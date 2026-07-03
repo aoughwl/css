@@ -1,0 +1,13 @@
+# nimony / nim build artifacts
+nimcache/
+*.nif
+*.nif.idx
+*.exe
+*.o
+*.obj
+nifcache/
+.nimcache/
+
+# editor / os
+*.swp
+.DS_Store
