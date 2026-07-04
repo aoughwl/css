@@ -20,6 +20,11 @@ validateSelector("a:notapseudo").valid                  # false
 
 # --- specificity + cascade ---
 $specificity("a.btn#go")                                # (1,1,1)
+
+# --- math functions are validated recursively, with precise errors ---
+validateValue("width", "clamp(1rem, calc(2vw + 10px), 3rem)").valid  # true
+validateValue("width", "clamp(1rem, 2vw)").error   # "clamp() expects 3 arguments, got 2"
+validateValue("width", "calc(100% - )").error      # "calc(): unexpected end of expression"
 ```
 
 > This package is generated from the [aoughwl](https://github.com/aoughwl) `css`
@@ -33,6 +38,7 @@ $specificity("a.btn#go")                                # (1,1,1)
 | --- | --- |
 | `css/validator` | single-pass, compiled-arena matcher for property values |
 | `css/vds` | MDN value-definition-syntax parser (`<len> \| <pct>`, `? * + #`, `\|\| &&`, …) |
+| `css/math` | recursive validator for the math functions (`calc`/`min`/`max`/`clamp`/…) — arity, the self-nesting `<calc-sum>` grammar, precise errors |
 | `css/selectors` | Selectors-4 validator (type/class/id/attribute/pseudo + combinators) |
 | `css/cascade` | selector specificity `(a,b,c)` + a source-order cascade resolver |
 | `css/value_lex` | CSS value tokenizer |

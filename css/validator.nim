@@ -19,6 +19,7 @@ import std/[tables, sets]
 import vds
 import value_lex
 import data_load
+import math
 
 # ---------------------------------------------------------------------------
 # Compiled grammar arena
@@ -412,6 +413,12 @@ proc valueMatches*(prop, value: string): bool =
 proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
   if not isProperty(prop):
     return (false, prop & " is not a known CSS property")
+  # Validate math/function arguments first — this catches the things the
+  # top-level grammar is lenient about: `clamp()` arity, an incomplete `calc()`,
+  # a nested `min()` that builds on itself, etc., with a precise message.
+  let fr = validateFunctionsIn(value)
+  if not fr.valid:
+    return (false, fr.error)
   if valueMatches(prop, value):
     return (true, "")
   # build a farthest-failure message from the last match attempt

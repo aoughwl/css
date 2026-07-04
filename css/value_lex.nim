@@ -13,6 +13,7 @@ type
     kind*: VTokKind
     text*: string        ## ident/func name, unit (dimension), hash body, or delim
     num*: string         ## numeric text for number/dimension/percent
+    args*: string        ## for vtFunc: the raw argument string inside the parens
 
 func isDigit(c: char): bool = c >= '0' and c <= '9'
 func isAlpha(c: char): bool = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z')
@@ -73,13 +74,16 @@ proc lexValue*(s: string): seq[VTok] =
       while i < n and isIdentCont(s[i]): w.add s[i]; inc i
       if i < n and s[i] == '(':
         var depth = 0
-        while i < n:
+        var argStr = ""
+        inc i               # consume '('
+        inc depth
+        while i < n and depth > 0:
           let cc = s[i]
           if cc == '(': inc depth
           elif cc == ')': dec depth
+          if depth > 0: argStr.add cc
           inc i
-          if depth == 0: break
-        result.add VTok(kind: vtFunc, text: w)
+        result.add VTok(kind: vtFunc, text: w, args: argStr)
       else:
         result.add VTok(kind: vtIdent, text: w)
     else:
