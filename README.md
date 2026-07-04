@@ -1,12 +1,10 @@
-# aoughwl/css
+# css
 
-**The CSS pack for [aoughwl](https://github.com/aoughwl) — an MDN-typed CSS
-validator and style DSL, expressed in aoughwl's own system, for nimony / Nim 3.0.**
+**An MDN-typed CSS validator for nimony / Nim 3.0** — validates CSS *values* and
+*selectors* against the official MDN data, and computes selector specificity /
+the cascade. Pure logic, **no dependencies** beyond the standard library.
 
-Successor to the Nim-2 [thing-king/css](https://github.com/thing-king/css),
-rebuilt as an aoughwl pack: it validates CSS *values* and *selectors* against the
-official MDN data, and lowers a `style` block straight into aoughwl's substrate as
-content-addressed style atoms.
+Successor to the Nim-2 [thing-king/css](https://github.com/thing-king/css).
 
 ```nim
 import css
@@ -20,13 +18,14 @@ validateValue("color",  "10px").valid                   # false
 validateSelector("ul > li:nth-child(2n+1)").valid       # true
 validateSelector("a:notapseudo").valid                  # false
 
-# --- the style DSL: declarations become substrate atoms + has_style facts ---
-style "card":
-  color: red
-  padding: 10.px 20.px
-
-echo renderStylesheet()      # .c…{color:red} .c…{padding:10px 20px}
+# --- specificity + cascade ---
+$specificity("a.btn#go")                                # (1,1,1)
 ```
+
+> This package is generated from the [aoughwl](https://github.com/aoughwl) `css`
+> pack. Inside aoughwl there is additionally a substrate-backed `style X:` DSL
+> (component styles become content-addressed atoms with provenance); that half
+> requires aoughwl and is not part of this standalone validator.
 
 ## What's in the pack
 
@@ -38,8 +37,7 @@ echo renderStylesheet()      # .c…{color:red} .c…{padding:10px 20px}
 | `css/cascade` | selector specificity `(a,b,c)` + a source-order cascade resolver |
 | `css/value_lex` | CSS value tokenizer |
 | `css/data_load` + `css/data` | the baked MDN tables (properties, syntaxes, types, units, pseudos) |
-| `css/deps/style_plugin` | the `style X:` block DSL — a compiler plugin authored in aoughwl |
-| `css/tools/gen_data` | regenerates `css/data.aowl` from the MDN JSON |
+| `css/tools/gen_data` | regenerates `css/data.nim` from the MDN JSON |
 
 Everything is **driven by the MDN data** in `css/data/*.json` — track a spec change
 by dropping in fresh JSON and re-running `css/tools/gen_data`. Trim the data to
@@ -56,14 +54,11 @@ constrain which CSS a project is allowed to use.
 | `cascade(decls): seq[Winner]` | resolve declarations to the winning value per property |
 | `isProperty` / `propertySyntax` | known-property check / its MDN syntax |
 | `isPseudoClass` / `isPseudoElement` | known pseudo-class / -element check |
-| `style name: …` | declare a component's styles into the substrate |
-| `styleOne` / `applyStyle` / `renderStylesheet` / `whyStyle` | style-atom operations + provenance |
 
 ## Install
 
-Place the pack under `packs/aoughwl/` in your project (so you have
-`packs/aoughwl/css.aowl` and `packs/aoughwl/css/`), build with `-p:packs`, and
-`import css`.
+Put this repo on your import path and `import css`. It compiles with plain
+nimony / Nim 3.0 — no substrate, no build steps, standard library only.
 
 ## Scope
 
