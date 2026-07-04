@@ -64,13 +64,23 @@ proc allocNode(n: CNode): int =
   arena.add n
   arena.len - 1
 
+func lowerStr(s: string): string =
+  result = ""
+  var i = 0
+  while i < s.len:
+    var c = s[i]
+    if c >= 'A' and c <= 'Z': c = char(ord(c) + 32)
+    result.add c
+    inc i
+
 proc compileVNode(v: VNode): int
 proc getGrammar(key, src: string): int
 
 proc compileVNode(v: VNode): int =
   case v.kind
   of nkKeyword:
-    result = allocNode CNode(op: opKw, text: v.text, mult: v.mult, lo: v.lo, hi: v.hi)
+    # store the keyword pre-lowered so matching never re-lowercases it
+    result = allocNode CNode(op: opKw, text: lowerStr(v.text), mult: v.mult, lo: v.lo, hi: v.hi)
   of nkLiteral:
     result = allocNode CNode(op: opLit, text: v.text, mult: v.mult, lo: v.lo, hi: v.hi)
   of nkType:
@@ -120,10 +130,12 @@ proc getGrammar(key, src: string): int =
 # ---------------------------------------------------------------------------
 
 var gToks: seq[VTok] = @[]
+var gLower: seq[string] = @[]   ## gToks[i].text pre-lowered once per value (for opKw)
 var gMemo = initTable[int, seq[int]]()
 var gInprog = initHashSet[int]()
 var gErrPos = 0
 var gExpected: seq[string] = @[]
+var gTrack = true               ## record farthest-failure info? (off on success path)
 
 func lower(s: string): string =
   result = ""
@@ -152,6 +164,10 @@ proc addUniq(s: var seq[int], v: int) =
   if not contains(s, v): s.add v
 
 proc expect(pos: int, desc: string) =
+  # Farthest-failure bookkeeping is only needed to phrase an error message, so it
+  # is skipped entirely on the success path (gTrack=false) — a big saving, since a
+  # single `<color>` match tries dozens of failing keyword alternatives.
+  if not gTrack: return
   if pos > gErrPos:
     gErrPos = pos
     gExpected = @[desc]
@@ -297,8 +313,9 @@ proc matchOne(id, pos: int): seq[int] =
   let n = arena[id]
   case n.op
   of opKw:
-    if pos < gToks.len and gToks[pos].kind == vtIdent and
-       lower(gToks[pos].text) == lower(n.text):
+    # n.text is pre-lowered at compile; gLower[pos] is the token pre-lowered once
+    # per value — so a big keyword OR never re-lowercases the same token.
+    if pos < gToks.len and gToks[pos].kind == vtIdent and gLower[pos] == n.text:
       result = @[pos+1]
     else:
       expect(pos, "'" & n.text & "'")
@@ -619,12 +636,38 @@ proc describeTok(t: VTok): string =
   of vtSlash: "'/'"
   of vtDelim: "'" & t.text & "'"
 
+# ---------------------------------------------------------------------------
+# validation levels — trade coverage for speed, 1:1 with what other tools do
+# ---------------------------------------------------------------------------
+
+type Level* = enum
+  lvValues    ## whole-value grammar match only (fast — the tier peers stop at)
+  lvFull      ## + recursive math checking + strict function-argument grammars
+
+var gLevel = lvFull
+proc setLevel*(l: Level) = gLevel = l
+proc level*(): Level = gLevel
+
 proc resetMatch(toks: seq[VTok]) =
   gToks = toks
-  gMemo = initTable[int, seq[int]]()
-  gInprog = initHashSet[int]()
+  gLower = @[]
+  var i = 0
+  while i < toks.len:
+    if toks[i].kind == vtIdent: gLower.add lowerStr(toks[i].text)
+    else: gLower.add ""      # only idents are ever compared as keywords
+    inc i
+  gMemo.clear()          # reuse the table's capacity instead of re-allocating it
+  # gInprog is self-clearing: every `incl` in matchNode is paired with an `excl`,
+  # so it is already empty here — no realloc needed.
   gErrPos = 0
   gExpected = @[]
+
+proc valueMatchesToks(prop: string, toks: seq[VTok]): bool =
+  resetMatch(toks)
+  let root = getGrammar("p:" & prop, propertySyntax(prop))
+  for e in matchNode(root, 0):
+    if e == toks.len: return true
+  false
 
 proc valueMatches*(prop, value: string): bool =
   let toks = lexValue(value)
@@ -632,11 +675,8 @@ proc valueMatches*(prop, value: string): bool =
   if toks.len == 1 and toks[0].kind == vtIdent and isGlobalKeyword(toks[0].text):
     return true
   if not isProperty(prop): return false
-  resetMatch(toks)
-  let root = getGrammar("p:" & prop, propertySyntax(prop))
-  for e in matchNode(root, 0):
-    if e == toks.len: return true
-  false
+  gTrack = false
+  valueMatchesToks(prop, toks)
 
 proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
   var prop = prop
@@ -647,33 +687,47 @@ proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
       prop = "print-color-adjust"    # deprecated alias for print-color-adjust
     else:
       return (false, prop & " is not a known CSS property")
-  # A top-level var()/env() can substitute an arbitrary token stream, so the used
-  # value is unknowable statically — accept (this is how the cascade resolves it).
-  if hasTopLevelSubst(value):
+  # Lex the value ONCE and share the tokens across every check below (the value
+  # lexer collapses nested functions to single opaque tokens, so a var()/env() or
+  # function seen here is at the value's top level).
+  let toks = lexValue(value)
+  if toks.len == 0:
+    return (false, "empty value")
+  if toks.len == 1 and toks[0].kind == vtIdent and isGlobalKeyword(toks[0].text):
+    return (true, "")                # inherit / initial / unset / revert
+  # A lone browser-prefixed keyword value (-webkit-sticky, -moz-max-content, …).
+  if toks.len == 1 and toks[0].kind == vtIdent and isVendorProperty(toks[0].text):
     return (true, "")
-  # A lone browser-prefixed keyword value (-webkit-sticky, -moz-max-content, …)
-  # is a valid vendor extension of the property's keyword set — accept it.
-  let vtoks = lexValue(value)
-  if vtoks.len == 1 and vtoks[0].kind == vtIdent and isVendorProperty(vtoks[0].text):
+  var hasFn = false
+  var i = 0
+  while i < toks.len:
+    if toks[i].kind == vtFunc:
+      hasFn = true
+      # a top-level var()/env() makes the used value unknowable → accept.
+      if isSubstitutionFunc(toks[i].text): return (true, "")
+    inc i
+  # Function-argument validation runs only when the value actually contains a
+  # function AND the caller wants the full level — precise math/arity errors.
+  if hasFn and gLevel == lvFull:
+    let fr = validateFunctionsIn(value)     # recursive math (calc/min/max/clamp…)
+    if not fr.valid:
+      return (false, fr.error)
+    let cf = checkFunctionsIn(value)        # rgb/hsl/gradients/… own grammars
+    if not cf.valid:
+      return (false, cf.error)
+  # …then the whole-value grammar match (reusing the tokens we already lexed).
+  # First pass with error-tracking OFF (fast); only if it fails do we re-run with
+  # tracking ON to phrase a precise farthest-failure message.
+  gTrack = false
+  if valueMatchesToks(prop, toks):
     return (true, "")
-  # Validate math/function arguments first — this catches the things the
-  # top-level grammar is lenient about: `clamp()` arity, an incomplete `calc()`,
-  # a nested `min()` that builds on itself, etc., with a precise message.
-  let fr = validateFunctionsIn(value)
-  if not fr.valid:
-    return (false, fr.error)
-  # …then non-math functions (rgb/hsl/gradients/transforms/…) against their own
-  # MDN grammar: wrong arity, wrong argument types, unknown function names.
-  let cf = checkFunctionsIn(value)
-  if not cf.valid:
-    return (false, cf.error)
-  if valueMatches(prop, value):
-    return (true, "")
+  gTrack = true
+  discard valueMatchesToks(prop, toks)
   # build a farthest-failure message from the last match attempt
   var got = "end of value"
   if gErrPos < gToks.len: got = describeTok(gToks[gErrPos])
   var exp = ""
-  var i = 0
+  i = 0
   while i < gExpected.len and i < 6:
     if i > 0: exp.add " | "
     exp.add gExpected[i]

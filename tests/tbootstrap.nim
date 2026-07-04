@@ -100,34 +100,61 @@ if rep.badSels.len > 0:
     echo "  " & rep.badSels[i]
     inc i
 
-# --- benchmark -------------------------------------------------------------
-# Full pipeline: parse the whole sheet + validate every declaration & selector.
+# --- benchmark: three tiers matched 1:1 with the other tools ---------------
+#   parse    — CSS text -> rules + declarations         (vs lightningcss/postcss/csstree parse)
+#   values   — parse + MDN value-grammar match, decls    (vs csstree matchProperty)
+#   full     — parse + values + math + fn-args + selectors (our full offering)
+
+proc benchParse(src: string, iters: int): int64 =
+  var checksum = 0
+  let t0 = getMonoTime()
+  var k = 0
+  while k < iters:
+    let s = parseStylesheet(src)
+    checksum = checksum + s.rules.len
+    inc k
+  ticks(getMonoTime()) - ticks(t0)
+
+proc benchValidate(src: string, iters: int, doSelectors: bool): int64 =
+  var checksum = 0
+  let t0 = getMonoTime()
+  var k = 0
+  while k < iters:
+    let sheet = parseStylesheet(src)
+    var decls: seq[Declaration] = @[]
+    var sels: seq[string] = @[]
+    walk(sheet.rules, false, decls, sels)
+    var j = 0
+    while j < decls.len:
+      let d = decls[j]
+      if not (d.prop.len >= 2 and d.prop[0] == '-' and d.prop[1] == '-'):
+        if validateValue(d.prop, d.value).valid: checksum = checksum + 1
+      inc j
+    if doSelectors:
+      j = 0
+      while j < sels.len:
+        if validateSelector(sels[j]).valid: checksum = checksum + 1
+        inc j
+    inc k
+  ticks(getMonoTime()) - ticks(t0)
+
 let iters = 20
-var checksum = 0
-let t0 = getMonoTime()
-i = 0
-while i < iters:
-  let r = runOnce(src, false)
-  checksum = checksum + r.dOk + r.sOk        # keep the work observable
-  inc i
-let elapsedNs = ticks(getMonoTime()) - ticks(t0)
+let bytes = int64(src.len)
 
-# parse-only, for the split.
-let p0 = getMonoTime()
-i = 0
-while i < iters:
-  let s = parseStylesheet(src)
-  checksum = checksum + s.rules.len
-  inc i
-let parseNs = ticks(getMonoTime()) - ticks(p0)
+let parseNs = benchParse(src, iters)
+setLevel(lvValues)
+let valuesNs = benchValidate(src, iters, false)
+setLevel(lvFull)
+let fullNs = benchValidate(src, iters, true)
 
-let totalUsPer = (elapsedNs div int64(iters)) div 1000
-let parseUsPer = (parseNs div int64(iters)) div 1000
-let mbPerSec = (int64(src.len) * 1000000) div (if totalUsPer > 0: totalUsPer else: 1) div 1024 div 1024
-let declsPerMs = (int64(rep.dOk + rep.dBad + rep.custom) * 1000) div (if totalUsPer > 0: totalUsPer else: 1)
+proc usPer(ns: int64): int64 = (ns div int64(iters)) div 1000
+proc mbps(ns: int64): int64 =
+  let us = usPer(ns)
+  if us > 0: (bytes * 1000000) div us div 1024 div 1024 else: 0
 
 echo ""
-echo "--- benchmark (" & $iters & " iterations, checksum " & $checksum & ") ---"
-echo "parse only:        " & $parseUsPer & " us/run"
-echo "parse + validate:  " & $totalUsPer & " us/run"
-echo "throughput:        ~" & $mbPerSec & " MB/s   (~" & $declsPerMs & " declarations/ms)"
+echo "--- benchmark (" & $iters & " iterations, " & $bytes & " bytes) ---"
+echo "  tier      us/run     MB/s"
+echo "  parse     " & $usPer(parseNs) & "        " & $mbps(parseNs)
+echo "  values    " & $usPer(valuesNs) & "        " & $mbps(valuesNs) & "   (decls only, grammar match)"
+echo "  full      " & $usPer(fullNs) & "        " & $mbps(fullNs) & "   (+ math + fn-args + selectors)"
