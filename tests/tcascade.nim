@@ -1,4 +1,3 @@
-import aoughwl
 import css
 
 proc check(desc: string, got, want: string) =

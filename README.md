@@ -9,7 +9,6 @@ official MDN data, and lowers a `style` block straight into aoughwl's substrate 
 content-addressed style atoms.
 
 ```nim
-import aoughwl
 import css
 
 # --- value validation (against each property's MDN value-definition syntax) ---
