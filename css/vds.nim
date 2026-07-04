@@ -31,6 +31,7 @@ type
     mkPlus                ## +  1 or more
     mkHash                ## #  comma-separated, 1 or more
     mkRange               ## {m,n}
+    mkHashRange           ## #{m,n}  comma-separated, m..n times
 
   NodeKind* = enum
     nkKeyword             ## a literal identifier value: auto, flex, solid
@@ -273,7 +274,17 @@ proc parseTerm(p: var Parser): VNode =
   of gtQues: discard p.advance; result.mult = mkOpt
   of gtStar: discard p.advance; result.mult = mkStar
   of gtPlus: discard p.advance; result.mult = mkPlus
-  of gtHash: discard p.advance; result.mult = mkHash
+  of gtHash:
+    discard p.advance
+    # a `#` may itself be followed by a count: `<number>#{3}` = exactly 3,
+    # comma-separated. Fold the two into one comma-repeat-with-bounds multiplier.
+    if p.peek.kind == gtBrace:
+      let b = p.advance
+      result.mult = mkHashRange
+      result.lo = b.lo
+      result.hi = b.hi
+    else:
+      result.mult = mkHash
   of gtBang: discard p.advance                     # required-group flag; treat as one
   of gtBrace:
     discard p.advance
@@ -326,6 +337,9 @@ func multStr(m: Mult, lo, hi: int): string =
     if hi >= HugeN: "{" & $lo & ",}"
     elif lo == hi: "{" & $lo & "}"
     else: "{" & $lo & "," & $hi & "}"
+  of mkHashRange:
+    if lo == hi: "#{" & $lo & "}"
+    else: "#{" & $lo & "," & $hi & "}"
 
 func combStr(c: Comb): string =
   case c

@@ -19,6 +19,7 @@ import std/[tables, sets]
 import vds
 import value_lex
 import data_load
+import data
 import math
 
 # ---------------------------------------------------------------------------
@@ -364,11 +365,238 @@ proc matchNode(id, pos: int): seq[int] =
     result = repeat(id, pos, 1, HugeN, true)
   of mkRange:
     result = repeat(id, pos, arena[id].lo, arena[id].hi, false)
+  of mkHashRange:
+    result = repeat(id, pos, arena[id].lo, arena[id].hi, true)
   gInprog.excl key
   gMemo[key] = result
 
 # `repeat`, `matchOne`, `matchOrderless` reference each other and `matchNode`;
 # nimony resolves the forward use of `matchOne`/`matchNode` above.
+
+# ---------------------------------------------------------------------------
+# strict function-notation validation
+# ---------------------------------------------------------------------------
+# The value lexer collapses `rgb(255, 0, 0)` into ONE opaque function token (with
+# the arguments captured as `.args`), so the top-level property grammar only ever
+# checks "a function appears here" and never looks inside. This pass fills that
+# gap: for every function anywhere in a value it looks up the function's own MDN
+# grammar and matches its arguments against it — catching wrong arity, wrong
+# argument types, and entirely unknown function names. Math functions keep their
+# dedicated recursive checker in math.aowl (which has finer-grained messages).
+
+func isFnIdentStart(c: char): bool =
+  (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '-'
+func isFnIdentCh(c: char): bool =
+  isFnIdentStart(c) or (c >= '0' and c <= '9')
+
+proc addFuncNames(s: string, dest: var HashSet[string]) =
+  ## Collect every `name(` occurring in a grammar string — this catches both the
+  ## top-level `rgb()` syntaxes AND functions defined only inline inside another
+  ## grammar (`cubic-bezier(…)`, `steps(…)`, `rect(…)`, `symbols(…)`, `type(…)`).
+  var i = 0
+  while i < s.len:
+    if isFnIdentStart(s[i]):
+      var j = i
+      var w = ""
+      while j < s.len and isFnIdentCh(s[j]):
+        w.add s[j]
+        inc j
+      if j < s.len and s[j] == '(':
+        dest.incl lower(w)
+      i = j
+      if i == 0: inc i           # never stall
+    else:
+      inc i
+
+proc buildFuncVocab(): HashSet[string] =
+  ## The full vocabulary of function names the MDN data knows about, built once
+  ## from the raw blobs (avoids relying on Table iteration order/support).
+  result = initHashSet[string]()
+  addFuncNames(cssSyntaxBlob, result)
+  addFuncNames(cssPropertyBlob, result)
+
+let funcVocab = buildFuncVocab()
+
+# MDN writes legacy comma-separated function forms with the comma *outside* the
+# optional part it belongs to — `rgb( <number>#{3} , <alpha-value>? )` and
+# `linear-gradient( [ <angle> … ]? , <color-stop-list> )`. Taken literally that
+# demands a comma even when the optional argument is absent, so `rgb(255,0,0)` and
+# `linear-gradient(red, blue)` would be rejected. Real CSS drops the comma with
+# the optional part. We fix this structurally: a comma sitting next to an optional
+# operand is folded *into* an optional group, so the comma appears only when its
+# neighbour does. This is spec-faithful and fixes every function with the wart.
+
+func isCommaLit(n: VNode): bool =
+  n.kind == nkLiteral and n.text == "," and n.mult == mkOne
+func isOptOperand(n: VNode): bool = n.mult == mkOpt
+
+proc mkOptSeq(a, b: VNode): VNode =
+  VNode(kind: nkList, comb: cbSeq, kids: @[a, b], mult: mkOpt)
+
+proc mkOptGroup(kids: seq[VNode]): VNode =
+  VNode(kind: nkList, comb: cbSeq, kids: kids, mult: mkOpt)
+
+proc foldSeqCommas(kids: seq[VNode]): seq[VNode] =
+  result = @[]
+  var i = 0
+  while i < kids.len:
+    let k = kids[i]
+    if isCommaLit(k) and i + 1 < kids.len and isOptOperand(kids[i+1]):
+      # `, X?`  →  `[ , X ]?`  (comma appears only with its trailing arg)
+      let x = kids[i+1]
+      x.mult = mkOne
+      result.add mkOptSeq(k, x)
+      i += 2
+    elif isOptOperand(k):
+      # a run of optional operands `A? B? …` immediately before a comma binds the
+      # comma to the whole run:  `A? B? ,`  →  `[ A? B? , ]?`  (the operands stay
+      # optional inside, so any subset — or none — of the prefix is accepted).
+      var j = i
+      while j < kids.len and isOptOperand(kids[j]): inc j
+      if j < kids.len and isCommaLit(kids[j]):
+        var grp: seq[VNode] = @[]
+        var m = i
+        while m <= j:
+          grp.add kids[m]
+          inc m
+        result.add mkOptGroup(grp)
+        i = j + 1
+      else:
+        result.add k
+        i += 1
+    else:
+      result.add k
+      i += 1
+
+proc normalizeCommas(v: VNode): VNode =
+  case v.kind
+  of nkFunc:
+    v.arg = normalizeCommas(v.arg)
+  of nkList:
+    var i = 0
+    while i < v.kids.len:
+      v.kids[i] = normalizeCommas(v.kids[i])
+      inc i
+    if v.comb == cbSeq:
+      v.kids = foldSeqCommas(v.kids)
+  else: discard
+  v
+
+var funcRootsCache = initTable[string, seq[int]]()
+
+func isSubstitutionFunc(name: string): bool =
+  ## var()/env() substitute an arbitrary token stream at used-value time, so a
+  ## value containing one can't be fully validated statically — accept the call
+  ## itself (checked for non-emptiness below) and don't over-constrain it.
+  let l = lower(name)
+  l == "var" or l == "env"
+
+func isOpaqueFunc(name: string): bool =
+  ## url() carries an opaque URL/string payload, not a value-grammar expression.
+  lower(name) == "url"
+
+proc hasTopLevelSubst(s: string): bool =
+  ## Does `s` contain a top-level var()/env()? (Nested functions are already
+  ## single opaque tokens, so any var/env we see here is at this scope.) When it
+  ## does, the surrounding scope can expand to any token stream and is accepted.
+  let toks = lexValue(s)
+  var i = 0
+  while i < toks.len:
+    if toks[i].kind == vtFunc and isSubstitutionFunc(toks[i].text): return true
+    inc i
+  false
+
+func hasPrefix(s, p: string): bool =
+  if s.len < p.len: return false
+  var i = 0
+  while i < p.len:
+    var c = s[i]
+    if c >= 'A' and c <= 'Z': c = char(ord(c) + 32)
+    if c != p[i]: return false
+    inc i
+  true
+
+func isVendorProperty(prop: string): bool =
+  ## Browser-prefixed properties (`-webkit-…`, `-moz-…`, …) are valid CSS we
+  ## can't grammar-check (no MDN entry), so accept rather than falsely reject.
+  hasPrefix(prop, "-webkit-") or hasPrefix(prop, "-moz-") or
+  hasPrefix(prop, "-ms-") or hasPrefix(prop, "-o-") or hasPrefix(prop, "-khtml-")
+
+proc funcArgRoots(name: string): seq[int] =
+  ## Compiled inner-argument grammars for every `name( … )` alternative in the
+  ## MDN data — a function like rgb() has four space/comma forms. Cached per name.
+  let key = lower(name)
+  if funcRootsCache.hasKey(key): return funcRootsCache.getOrDefault(key, @[])
+  var res: seq[int] = @[]
+  let synKey = name & "()"
+  if isSyntax(synKey):
+    let root = normalizeCommas(parseSyntax(syntaxOf(synKey)))
+    var alts: seq[VNode] = @[]
+    if root.kind == nkFunc:
+      alts.add root
+    elif root.kind == nkList and root.comb == cbOr:
+      var i = 0
+      while i < root.kids.len:
+        if root.kids[i].kind == nkFunc: alts.add root.kids[i]
+        inc i
+    var i = 0
+    while i < alts.len:
+      if lower(alts[i].fname) == lower(name):
+        res.add compileVNode(alts[i].arg)
+      inc i
+  funcRootsCache[key] = res
+  res
+
+proc argsMatch(name, args: string): bool =
+  ## Does `args` fully satisfy some alternative grammar for `name( … )`?
+  let roots = funcArgRoots(name)
+  if roots.len == 0: return false
+  let toks = lexValue(args)
+  resetMatch(toks)
+  var i = 0
+  while i < roots.len:
+    for e in matchNode(roots[i], 0):
+      if e == toks.len: return true
+    inc i
+  false
+
+proc checkFunctionsIn(value: string): tuple[valid: bool, error: string] =
+  ## Validate every function token appearing anywhere in `value`, recursing into
+  ## nested calls. Runs to completion before the whole-value match, and each
+  ## `argsMatch` fully finishes before the next, so the shared matcher state is
+  ## never re-entered mid-match.
+  let toks = lexValue(value)
+  var i = 0
+  while i < toks.len:
+    let t = toks[i]
+    if t.kind == vtFunc:
+      if isMathFunc(t.text):
+        discard                      # handled by validateFunctionsIn, better msgs
+      elif isSubstitutionFunc(t.text):
+        if t.args.len == 0:
+          return (false, t.text & "() requires an argument")
+      elif isOpaqueFunc(t.text):
+        discard                        # url(): opaque URL/string payload
+      elif hasTopLevelSubst(t.args):
+        discard                        # e.g. rgba(var(--rgb), .5): var() may
+                                       # expand to any number of values — can't
+                                       # meaningfully arg-check this call
+      elif isSyntax(t.text & "()"):
+        if not argsMatch(t.text, t.args):
+          return (false, "invalid arguments to " & t.text & "(): '" &
+            t.args & "' — expected " & syntaxOf(t.text & "()"))
+        let inner = checkFunctionsIn(t.args)
+        if not inner.valid: return inner
+      elif funcVocab.contains(lower(t.text)):
+        # a function the data knows only inline (cubic-bezier/steps/rect/…): we
+        # have no clean top-level grammar to arg-check, so accept the call but
+        # still descend to reject any unknown/invalid nested function.
+        let inner = checkFunctionsIn(t.args)
+        if not inner.valid: return inner
+      else:
+        return (false, "unknown function '" & t.text & "()'")
+    inc i
+  (true, "")
 
 # ---------------------------------------------------------------------------
 # public API
@@ -411,14 +639,34 @@ proc valueMatches*(prop, value: string): bool =
   false
 
 proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
+  var prop = prop
   if not isProperty(prop):
-    return (false, prop & " is not a known CSS property")
+    if isVendorProperty(prop):
+      return (true, "")              # browser-prefixed property: accept, uncheckable
+    elif lower(prop) == "color-adjust" and isProperty("print-color-adjust"):
+      prop = "print-color-adjust"    # deprecated alias for print-color-adjust
+    else:
+      return (false, prop & " is not a known CSS property")
+  # A top-level var()/env() can substitute an arbitrary token stream, so the used
+  # value is unknowable statically — accept (this is how the cascade resolves it).
+  if hasTopLevelSubst(value):
+    return (true, "")
+  # A lone browser-prefixed keyword value (-webkit-sticky, -moz-max-content, …)
+  # is a valid vendor extension of the property's keyword set — accept it.
+  let vtoks = lexValue(value)
+  if vtoks.len == 1 and vtoks[0].kind == vtIdent and isVendorProperty(vtoks[0].text):
+    return (true, "")
   # Validate math/function arguments first — this catches the things the
   # top-level grammar is lenient about: `clamp()` arity, an incomplete `calc()`,
   # a nested `min()` that builds on itself, etc., with a precise message.
   let fr = validateFunctionsIn(value)
   if not fr.valid:
     return (false, fr.error)
+  # …then non-math functions (rgb/hsl/gradients/transforms/…) against their own
+  # MDN grammar: wrong arity, wrong argument types, unknown function names.
+  let cf = checkFunctionsIn(value)
+  if not cf.valid:
+    return (false, cf.error)
   if valueMatches(prop, value):
     return (true, "")
   # build a farthest-failure message from the last match attempt

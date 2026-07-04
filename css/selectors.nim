@@ -124,6 +124,10 @@ proc parsePseudo(st: var SelState): bool =
       inc st.pos
     if depth != 0: return fail(st, "unbalanced '(' in pseudo argument")
   let l = toLower(name)
+  # Browser-prefixed pseudos (::-webkit-…, ::-moz-…, :-moz-…) are valid vendor
+  # extensions with no MDN entry — accept them rather than falsely reject.
+  if l.len > 0 and l[0] == '-':
+    return true
   if element:
     if not isPseudoElement(l): return fail(st, "unknown pseudo-element '::" & name & "'")
   else:
