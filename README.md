@@ -30,14 +30,14 @@ Most CSS tools **parse** but do not **validate against the grammar**. The few
 that do (css-tree, the W3C validator) stop at flat value matching. This engine
 goes the whole way:
 
-- ✅ **Every property value** matched against its MDN value-definition syntax
+- **Every property value** matched against its MDN value-definition syntax
   (`<length-percentage>{1,4} | auto`, `<'border-radius'>`, `||`, `&&`, `#{n}`, …)
-- ✅ **Math functions checked recursively** — the self-nesting
+- **Math functions checked recursively** — the self-nesting
   `clamp(calc(…), min(…), max(…))` grammar, exact arity, precise errors
-- ✅ **Every function** (`rgb`/`hsl`/gradients/transforms/…) matched against its
+- **Every function** (`rgb`/`hsl`/gradients/transforms/…) matched against its
   own signature — wrong arity, wrong argument types, unknown functions
-- ✅ **Selectors** validated against Selectors-4 (specificity + cascade too)
-- ✅ **Real-world CSS**: `var()`/`env()` substitution, vendor prefixes,
+- **Selectors** validated against Selectors-4 (specificity + cascade too)
+- **Real-world CSS**: `var()`/`env()` substitution, vendor prefixes,
   `url(data:…)`, comments, `!important` — handled the way browsers do
 
 Everything is **driven by the MDN data** in `css/data/*.json`: track a spec
@@ -119,10 +119,6 @@ echo renderStylesheet()
 # .c5731cd7d{padding:10px 20px}
 # .c1b85debe{color:blue}
 # .cc4e1b13c{cursor:pointer}
-
-echo whyStyle("card", "color", "red")
-# card has_style .c3de3878d  { color: red }
-#   <- valid per MDN grammar
 ```
 
 Every declaration is validated against the MDN grammar as it is registered
