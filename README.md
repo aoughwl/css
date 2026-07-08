@@ -5,7 +5,7 @@ stylesheet, then validate every value against its official grammar, every functi
 against its own signature, and every selector against Selectors-4. Pure logic,
 standard library only, **no dependencies**.
 
-**📖 Full docs → [aoughwl.github.io/docs/web](https://aoughwl.github.io/docs/web)**
+**📖 Full docs → [aoughwl.github.io/docs/css](https://aoughwl.github.io/docs/css)**
 
 ```nim
 import css
