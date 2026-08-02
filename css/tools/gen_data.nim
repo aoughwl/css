@@ -22,7 +22,13 @@ proc load(name: string): JsonNode =
   parseFile(dataDir / name & ".json")
 
 ## unit dimension buckets, derived from the MDN "groups" tags.
-proc unitDimension(groups: seq[string]): string =
+proc unitDimension(name: string; groups: seq[string]): string =
+  # `fr` is the <flex> unit, but MDN tags it only "CSS Units"/"CSS Grid Layout" —
+  # there is no "CSS Flexible Lengths" group on it — so the group mapping below
+  # bucketed it as "other" and every `<flex>` position in the grammar rejected
+  # it. `grid-template-columns: 1fr` failed to validate as a result. Named here
+  # because the dimension is a fact about the unit, not about MDN's tagging.
+  if name == "fr": return "flex"
   for g in groups:
     case g
     of "CSS Lengths": return "length"
@@ -72,7 +78,7 @@ when isMainModule:
     var groups: seq[string]
     if body.hasKey("groups"):
       for g in body["groups"]: groups.add g.getStr
-    units.add (name, unitDimension(groups))
+    units.add (name, unitDimension(name, groups))
 
   # at-rules: @name -> syntax
   var atrules: seq[(string, string)]

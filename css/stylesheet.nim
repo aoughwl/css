@@ -123,6 +123,8 @@ proc installedStylesheet*(): Stylesheet =
   ## The installed sheet — what a renderer emits alongside its scoped classes.
   gSheet
 
-proc styleOf*(selector: string): Style =
-  ## The installed sheet's style for `selector`, or the empty style.
+proc installedStyle*(selector: string): Style =
+  ## The installed sheet's style for `selector`, or the empty style. Named apart
+  ## from `styleval`'s `styleOf`, which parses DECLARATIONS — both take a string
+  ## and return a `Style`, so sharing a name made every call ambiguous.
   gSheet[selector]

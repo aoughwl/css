@@ -61,6 +61,56 @@ proc declare*(prop, value: string): Style =
   ## A one-declaration style.
   result = Style(decls: @[StyleDecl(prop: prop, value: value)])
 
+proc styleOf*(decls: string): Style =
+  ## Parse a `"prop:value;prop:value"` block into a `Style`.
+  ##
+  ## The point is authoring density: a design-system rule is a handful of
+  ## declarations, and spelling each as a separate `declare(…)` call buries the
+  ## rule in ceremony. The result is an ordinary `Style`, so it still merges with
+  ## `&` and still reports through `errors`. Values may contain `:` (a `url(…)`,
+  ## a `calc()` with a nested function), so only the FIRST colon separates.
+  result = Style(decls: @[])
+  var prop = ""
+  var value = ""
+  var inProp = true
+  var depth = 0
+  var i = 0
+  while i <= decls.len:
+    if i == decls.len or (decls[i] == ';' and depth == 0):
+      var p = ""
+      var j = 0
+      while j < prop.len:
+        if prop[j] != ' ' and prop[j] != '\n' and prop[j] != '\t' and prop[j] != '\r':
+          p.add prop[j]
+        inc j
+      # trim the value's outer whitespace but keep it internally intact
+      var a = 0
+      var b = value.len
+      while a < b and (value[a] == ' ' or value[a] == '\n' or value[a] == '\t' or value[a] == '\r'):
+        inc a
+      while b > a and (value[b-1] == ' ' or value[b-1] == '\n' or value[b-1] == '\t' or value[b-1] == '\r'):
+        dec b
+      var v = ""
+      var k = a
+      while k < b:
+        v.add value[k]
+        inc k
+      if p.len > 0: result.set(p, v)
+      prop = ""
+      value = ""
+      inProp = true
+    elif decls[i] == '(':
+      inc depth
+      if inProp: prop.add decls[i] else: value.add decls[i]
+    elif decls[i] == ')':
+      if depth > 0: dec depth
+      if inProp: prop.add decls[i] else: value.add decls[i]
+    elif decls[i] == ':' and inProp:
+      inProp = false
+    else:
+      if inProp: prop.add decls[i] else: value.add decls[i]
+    inc i
+
 proc `&`*(a, b: Style): Style =
   ## Merge two styles, **right wins** per property. This is the override
   ## operator: `theme & style(color = "red")` is the theme with its colour
