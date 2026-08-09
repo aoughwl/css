@@ -678,8 +678,60 @@ proc valueMatches*(prop, value: string): bool =
   gTrack = false
   valueMatchesToks(prop, toks)
 
+proc isWsV(c: char): bool =
+  c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '\f'
+
+proc splitImportant(value: string): tuple[v: string, important: bool] =
+  ## Peel a trailing `!important` off a declaration value.
+  ##
+  ## `!important` is legal on ANY declaration — it is part of the DECLARATION
+  ## grammar, not of any property's value grammar — so the value checks below
+  ## must never see it. They did, and the failure was badly misdirected: the
+  ## farthest-failure reporter blamed the VALUE token, so
+  ##
+  ##   styleOf("cursor:row-resize !important")
+  ##   -> at token 1: expected a url | 'auto' | 'default' | …, got 'row-resize'
+  ##
+  ## sent you looking at `row-resize`, which is a perfectly good cursor. Bare
+  ## `cursor:row-resize` validated. `* { cursor: X !important }` is the standard
+  ## way to hold a cursor steady across a drag, so the kit could not express an
+  ## ordinary rule — and in a kit whose whole premise is that it owns every class
+  ## name, a declaration it cannot express is what pushes someone to a
+  ## hand-written stylesheet.
+  ##
+  ## Spelled tolerantly, the way `parse.nim`'s own `stripImportant` is:
+  ## case-insensitive, and `! important` with space allowed. Anything that is not
+  ## exactly that is left alone, so a typo like `!importnat` still reaches the
+  ## lexer and still fails — loudly, and about the right thing.
+  var e = value.len
+  while e > 0 and isWsV(value[e-1]): dec e
+  var w = e
+  while w > 0 and not isWsV(value[w-1]) and value[w-1] != '!': dec w
+  var word = ""
+  var i = w
+  while i < e:
+    word.add value[i]
+    inc i
+  if lower(word) != "important": return (value, false)
+  var p = w
+  while p > 0 and isWsV(value[p-1]): dec p
+  if p == 0 or value[p-1] != '!': return (value, false)
+  dec p                                   # drop the '!'
+  while p > 0 and isWsV(value[p-1]): dec p
+  var v = ""
+  i = 0
+  while i < p:
+    v.add value[i]
+    inc i
+  (v, true)
+
 proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
   var prop = prop
+  # `!important` belongs to the declaration, not the value — strip it before any
+  # value check runs. A value that is ONLY `!important` has nothing left to
+  # validate, so it stays empty and falls into the "empty value" arm below.
+  let (value, isImportant) = splitImportant(value)
+  discard isImportant
   if not isProperty(prop):
     if isVendorProperty(prop):
       return (true, "")              # browser-prefixed property: accept, uncheckable
