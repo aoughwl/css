@@ -35,3 +35,21 @@ check("is property bogus",          isProperty("dispaly"), false)
 check("pseudo-class hover",         isPseudoClass("hover"), true)
 check("pseudo-element before",      isPseudoElement("before"), true)
 check("functional nth-child",       isFunctionalPseudoClass("nth-child"), true)
+
+echo "hex colours:"
+# A hash token is not a colour. `#ff` and `#main` both lex as one, and
+# accepting them meant `color: #ff` validated - two hex digits is not a
+# colour in any CSS, and a renderer trusting this paints something arbitrary
+# instead of skipping the declaration. Found by cross-checking against one.
+check("#ff is not a colour",        validateValue("color", "#ff").valid, false)
+check("#f is not a colour",         validateValue("color", "#f").valid, false)
+check("#fffff is not a colour",     validateValue("color", "#fffff").valid, false)
+check("#fffffff is not a colour",   validateValue("color", "#fffffff").valid, false)
+check("#main is not a colour",      validateValue("color", "#main").valid, false)
+check("non-hex digits rejected",    validateValue("color", "#12345g").valid, false)
+check("#fff",                       validateValue("color", "#fff").valid, true)
+check("#FFF uppercase",             validateValue("color", "#FFF").valid, true)
+check("#ffff with alpha",           validateValue("color", "#ffff").valid, true)
+check("#ff0000",                    validateValue("color", "#ff0000").valid, true)
+check("#FF0000FF with alpha",       validateValue("color", "#FF0000FF").valid, true)
+check("hex inside a shorthand",     validateValue("border", "1px solid #ccc").valid, true)

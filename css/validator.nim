@@ -185,6 +185,21 @@ func isZeroNum(num: string): bool =
     inc i
   seen
 
+func isHexDigit(c: char): bool =
+  (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F')
+
+func isHexColorBody*(body: string): bool =
+  ## The part after the `#`. CSS allows exactly 3, 4, 6 or 8 hex digits -
+  ## RGB, RGBA, RRGGBB and RRGGBBAA. Anything else is a hash that happens to
+  ## be somewhere a colour was wanted.
+  if body.len != 3 and body.len != 4 and body.len != 6 and body.len != 8:
+    return false
+  var i = 0
+  while i < body.len:
+    if not isHexDigit(body[i]): return false
+    inc i
+  true
+
 func isIntNum(num: string): bool =
   var i = 0
   while i < num.len:
@@ -240,7 +255,11 @@ proc matchPrim(name: string, pos: int): seq[int] =
   of "string":
     ok = t.kind == vtString
   of "hex-color":
-    ok = t.kind == vtHash
+    # A hash token is not a colour by itself. `#ff` and `#main` both lex as
+    # one, and accepting them made `color: #ff` validate - two hex digits is
+    # not a colour in any CSS, and a renderer that trusted this would paint
+    # something arbitrary rather than skip the declaration.
+    ok = t.kind == vtHash and isHexColorBody(t.text)
   of "custom-ident", "dashed-ident", "ident", "custom-property-name", "keyframes-name":
     ok = t.kind == vtIdent
   of "url":

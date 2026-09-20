@@ -12,9 +12,18 @@
 ## property, ordered by (specificity, then source order) — the core of "computed
 ## styles" without inheritance/initial-value resolution.
 ##
-## Scope: the argument of a functional pseudo (`:not(...)`, `:nth-child(...)`)
-## is skipped for counting rather than recursed into — so `:not(.a.b)` counts as
-## one pseudo-class, not its most-specific argument. Namespaces are ignored.
+## Two rules here are easy to get wrong and both change which rule wins:
+##
+## * `:before`, `:after`, `:first-line` and `:first-letter` are the LEGACY
+##   one-colon spellings of pseudo-ELEMENTS. They count in `c`, exactly as
+##   `::after` does, not in `b`. Counting them as pseudo-classes makes
+##   `.tab:after` beat `.tab.active`, which is the wrong rule painting.
+## * `:not()`, `:is()` and `:has()` contribute NOTHING themselves and take the
+##   specificity of their most specific argument, so `:not(#id)` is worth an
+##   id. `:where()` contributes nothing at all, argument included.
+##
+## Namespaces are ignored. The `of S` form of `:nth-child()` does not take its
+## argument into account.
 
 type Specificity* = object
   a*: int   ## id selectors
@@ -40,6 +49,29 @@ proc `==`*(x, y: Specificity): bool =
 proc `$`*(s: Specificity): string =
   "(" & $s.a & "," & $s.b & "," & $s.c & ")"
 
+proc toLowerC(s: string, start, stop: int): string =
+  result = ""
+  var i = start
+  while i < stop:
+    var c = s[i]
+    if c >= 'A' and c <= 'Z': c = chr(ord(c) + 32)
+    result.add c
+    inc i
+
+proc isLegacyPseudoElement(name: string): bool =
+  ## The four that predate `::` and are still written with one colon more
+  ## often than not. Everything else spelled with one colon is a class.
+  name == "before" or name == "after" or name == "first-line" or
+    name == "first-letter"
+
+proc takesArgumentSpecificity(name: string): bool =
+  ## The selector-list pseudos, whose specificity IS their argument's.
+  ## `:where` is handled separately because it takes nothing at all.
+  name == "not" or name == "is" or name == "has" or name == "matches" or
+    name == "any" or name == "-moz-any" or name == "-webkit-any"
+
+proc specificityOfRange(sel: string, start, stop: int): Specificity
+
 proc specificityOne(sel: string, start, stop: int): Specificity =
   ## Count one complex selector occupying sel[start ..< stop].
   result = Specificity(a: 0, b: 0, c: 0)
@@ -61,25 +93,44 @@ proc specificityOne(sel: string, start, stop: int): Specificity =
       while i < stop and sel[i] != ']': inc i
       if i < stop: inc i
     elif c == ':':
-      if i + 1 < stop and sel[i+1] == ':':
-        inc result.c            # ::pseudo-element
+      var doubled = false
+      inc i
+      if i < stop and sel[i] == ':':
+        doubled = true
         inc i
-        inc i
-      else:
-        inc result.b            # :pseudo-class
-        inc i
+      let nameAt = i
       while i < stop and isIdentCharC(sel[i]): inc i
-      # skip a functional argument (...) without recursing
+      let name = toLowerC(sel, nameAt, i)
+      # Find the functional argument, if any, before deciding anything: the
+      # name alone does not say whether this one takes its argument.
+      var argStart = -1
+      var argStop = -1
       if i < stop and sel[i] == '(':
         var depth = 0
+        argStart = i + 1
         while i < stop:
           if sel[i] == '(': inc depth
           elif sel[i] == ')':
             dec depth
             if depth == 0:
+              argStop = i
               inc i
               break
           inc i
+        if argStop < 0: argStop = stop
+      if doubled or isLegacyPseudoElement(name):
+        inc result.c
+      elif name == "where":
+        discard                 # contributes nothing, argument included
+      elif argStart >= 0 and takesArgumentSpecificity(name):
+        # The pseudo itself is worth nothing; its argument is worth whatever
+        # the most specific thing inside it is worth.
+        let inner = specificityOfRange(sel, argStart, argStop)
+        result.a = result.a + inner.a
+        result.b = result.b + inner.b
+        result.c = result.c + inner.c
+      else:
+        inc result.b            # an ordinary pseudo-class
     elif c == '*':
       inc i                     # universal — contributes nothing
     elif isIdentStartC(c):
@@ -89,27 +140,31 @@ proc specificityOne(sel: string, start, stop: int): Specificity =
     else:
       inc i                     # combinators, whitespace, commas
 
-proc specificity*(sel: string): Specificity =
-  ## Highest specificity across a comma-separated selector list.
+proc specificityOfRange(sel: string, start, stop: int): Specificity =
+  ## Highest specificity across a comma-separated list inside sel[start..<stop].
   result = Specificity(a: 0, b: 0, c: 0)
-  var i = 0
-  var segStart = 0
+  var i = start
+  var segStart = start
   var depth = 0
   var seen = false
-  while i <= sel.len:
-    let atEnd = i == sel.len
+  while i <= stop:
+    let atEnd = i == stop
     let c = (if atEnd: ',' else: sel[i])
     if not atEnd and c == '(':
       inc depth
     elif not atEnd and c == ')':
       if depth > 0: dec depth
     if (atEnd or c == ',') and depth == 0:
-      let s = specificityOne(sel, segStart, i)
-      if not seen or result < s:
-        result = s
+      let one = specificityOne(sel, segStart, i)
+      if not seen or result < one:
+        result = one
         seen = true
       segStart = i + 1
     inc i
+
+proc specificity*(sel: string): Specificity =
+  ## Highest specificity across a comma-separated selector list.
+  specificityOfRange(sel, 0, sel.len)
 
 type Decl* = object
   selector*: string
