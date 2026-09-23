@@ -31,4 +31,5 @@ import css/media
 import css/shorthand
 import css/computed
 import css/imports
-export validator, selectors, cascade, data_load, styleval, stylesheet, parse, atrules, lint, dom, match, media, shorthand, computed, imports
+import css/color
+export validator, selectors, cascade, data_load, styleval, stylesheet, parse, atrules, lint, dom, match, media, shorthand, computed, imports, color

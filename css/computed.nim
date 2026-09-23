@@ -48,6 +48,7 @@ import media
 import shorthand
 import validator
 import data_load
+import color
 
 type
   Origin* = enum
@@ -1054,14 +1055,44 @@ proc registeredOf(e: StyleEngine, name: string): tuple[found: bool, r: Registere
 
 proc get*(cs: ComputedStyle, prop: string): string
 
+var colorProps = initTable[string, bool]()
+
+proc isColorProp*(p: string): bool =
+  ## Does the property take a single colour (color, border-top-color, fill…)?
+  if colorProps.hasKey(p): return colorProps.getOrDefault(p, false)
+  let syn = propertySyntax(p)
+  var r = syn == "<color>" or syn == "<color> | auto" or syn == "auto | <color>" or
+          p == "color" or p == "background-color" or p == "outline-color"
+  if not r and syn.len > 0:
+    # e.g. "<'border-top-color'>" style references
+    var i = 0
+    var body = ""
+    while i < syn.len:
+      if syn[i] != '<' and syn[i] != '>' and syn[i] != '\'': body.add syn[i]
+      inc i
+    if body != p and (body == "color" or (body.len > 6 and isColorProp(body))): r = true
+  colorProps[p] = r
+  r
+
 proc getLonghand(cs: ComputedStyle, p: string): string =
-  if cs.values.hasKey(p): return cs.values.getOrDefault(p, "")
-  if isCustom(p): return ""
-  let wm = (if cs.values.hasKey("writing-mode"): cs.values.getOrDefault("writing-mode", "") else: "horizontal-tb")
-  let dir = (if cs.values.hasKey("direction"): cs.values.getOrDefault("direction", "") else: "ltr")
-  let ph = physicalOf(p, wm, dir)
-  if ph != p: return getLonghand(cs, ph)
-  initialValue(p)
+  var v = ""
+  if cs.values.hasKey(p):
+    v = cs.values.getOrDefault(p, "")
+  elif isCustom(p):
+    return ""
+  else:
+    let wm = (if cs.values.hasKey("writing-mode"): cs.values.getOrDefault("writing-mode", "") else: "horizontal-tb")
+    let dir = (if cs.values.hasKey("direction"): cs.values.getOrDefault("direction", "") else: "ltr")
+    let ph = physicalOf(p, wm, dir)
+    if ph != p: return getLonghand(cs, ph)
+    v = initialValue(p)
+    if p == "color" and v.len > 0: v = normalizeColor(v)
+  # the resolved value, as getComputedStyle reports it: currentcolor → colour
+  if p != "color" and v.len > 0 and (v[0] == 'c' or v[0] == 'C') and
+     lower(v) == "currentcolor" and isColorProp(p):
+    return getLonghand(cs, "color")
+  if v.len > 0 and isColorProp(p): v = normalizeColor(v)
+  v
 
 proc get*(cs: ComputedStyle, prop: string): string =
   ## The computed value of `prop`: set/inherited, or else its initial value.
@@ -1249,6 +1280,17 @@ proc computeOne(e: StyleEngine, el: Element, pseudo: string, parent: ComputedSty
     else:
       cs.values[p] = absolutize(v, LenCtx(fontPx: fontPx, parentFontPx: parentFont,
                                           rootFontPx: rootFontPx, env: e.env, forFontSize: false))
+  # colours: the legacy sRGB forms compute to rgb()/rgba(); `color:
+  # currentcolor` means the inherited colour
+  var fixes: seq[tuple[k, v: string]] = @[]
+  for k, v in cs.values.pairs:
+    if not isCustom(k) and isColorProp(k):
+      if k == "color" and lower(trimS(v)) == "currentcolor":
+        fixes.add (k: k, v: (if hasParent: parent.get("color") else: "rgb(0, 0, 0)"))
+      else:
+        let n = normalizeColor(v)
+        if n != v: fixes.add (k: k, v: n)
+  for f in fixes: cs.values[f.k] = f.v
   cs
 
 proc ancestorsTopDown(el: Element): seq[Element] =

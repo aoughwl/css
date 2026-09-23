@@ -44,19 +44,19 @@ p { background: var(--missing) }
 
 let csCard = eng.computedStyle(card)
 echo "cascade basics:"
-eq("#app beats .dark",                 csCard.get("color"), "rgb(1 2 3)")
+eq("#app beats .dark",                 csCard.get("color"), "rgb(1, 2, 3)")
 eq("display from @supports",           csCard.get("display"), "grid")
 eq("inline beats rule",                csCard.get("padding-left"), "10px")
 eq("margin 1em at 20px font",          csCard.get("margin-top"), "20px")
 eq("margin 2em",                       csCard.get("margin-left"), "40px")
 eq("font-size 1.25em of 16",           csCard.get("font-size"), "20px")
-eq("border var() substituted",         csCard.get("border-top-color"), "#336699")
+eq("border var() substituted",         csCard.get("border-top-color"), "rgb(51, 102, 153)")
 eq("border width",                     csCard.get("border-left-width"), "1px")
 eq("custom prop from style attr",      csCard.get("--gap"), "7px")
 
 let csH1 = eng.computedStyle(h1)
 echo "h1:"
-eq("!important beats specificity",     csH1.get("color"), "red")
+eq("!important beats specificity",     csH1.get("color"), "rgb(255, 0, 0)")
 eq("font-size 2em of 20px",            csH1.get("font-size"), "40px")
 eq("margin-bottom .5em of 40",         csH1.get("margin-bottom"), "20px")
 eq("unlayered beats layers",           csH1.get("word-spacing"), "2px")
@@ -75,24 +75,24 @@ eq("3pt",                              csP.get("text-indent"), "4px")
 eq("@media min-width applies",         csP.get("letter-spacing"), "1px")
 eq("var() in a shorthand (gap)",       csP.get("row-gap"), "7px")
 eq("shorthand get when equal",         csP.get("gap"), "7px")
-eq("invalid var() -> unset (initial)", csP.get("background-color"), "transparent")
-eq("inherited color",                  csP.get("color"), "rgb(1 2 3)")
+eq("invalid var() -> unset (initial)", csP.get("background-color"), "rgba(0, 0, 0, 0)")
+eq("inherited color",                  csP.get("color"), "rgb(1, 2, 3)")
 eq("UA margin-block 1em of 12px",      csP.get("margin-top"), "12px")
 
 let csA = eng.computedStyle(a)
 echo "a (var with fallback):"
-eq("color var(--brand)",               csA.get("color"), "#336699")
+eq("color var(--brand)",               csA.get("color"), "rgb(51, 102, 153)")
 eq("fallback in shorthand",            csA.get("text-decoration-style"), "dotted")
 
 echo "nesting and states:"
-eq("before hover",                     eng.computedStyle(card).get("background-color"), "transparent")
+eq("before hover",                     eng.computedStyle(card).get("background-color"), "rgba(0, 0, 0, 0)")
 card.setState("hover")
-eq("&:hover applies",                  eng.computedStyle(card).get("background-color"), "orange")
+eq("&:hover applies",                  eng.computedStyle(card).get("background-color"), "rgb(255, 165, 0)")
 card.setState("hover", false)
 let t2 = elem("h2.title", elem("div.card"))
 let outer = elem("html", elem("body", t2))
 discard outer
-eq("`.title &` nesting",               eng.computedStyle(t2.children[0]).get("color"), "blue")
+eq("`.title &` nesting",               eng.computedStyle(t2.children[0]).get("color"), "rgb(0, 0, 255)")
 
 echo "media env changes take effect:"
 eng.env.width = 500.0
@@ -139,13 +139,13 @@ let su = elem("span.u")
 let sr = elem("span.r")
 let em1 = elem("em")
 discard elem("div", si, sn, su, sr, em1)
-eq("inherit",                          kEng.computedStyle(si).get("color"), "red")
-eq("initial",                          kEng.computedStyle(sn).get("color"), "canvastext")
+eq("inherit",                          kEng.computedStyle(si).get("color"), "rgb(255, 0, 0)")
+eq("initial",                          kEng.computedStyle(sn).get("color"), "rgb(0, 0, 0)")
 eq("inherit non-inherited prop",       kEng.computedStyle(sn).get("margin-top"), "5px")
-eq("unset on inherited = inherit",     kEng.computedStyle(su).get("color"), "red")
-eq("unset on non-inherited = initial", kEng.computedStyle(su).get("border-top-color"), "currentcolor")
-eq("revert (no UA rule) = unset",      kEng.computedStyle(sr).get("color"), "red")
-eq("revert-layer -> earlier layer",    kEng.computedStyle(em1).get("color"), "purple")
+eq("unset on inherited = inherit",     kEng.computedStyle(su).get("color"), "rgb(255, 0, 0)")
+eq("unset on non-inherited = initial", kEng.computedStyle(su).get("border-top-color"), "rgb(255, 0, 0)")
+eq("revert (no UA rule) = unset",      kEng.computedStyle(sr).get("color"), "rgb(255, 0, 0)")
+eq("revert-layer -> earlier layer",    kEng.computedStyle(em1).get("color"), "rgb(128, 0, 128)")
 
 echo "cycles and @property:"
 let cEng = newStyleEngine()
@@ -175,8 +175,8 @@ discard elem("html", elem("div.card", img1, elem("div.content", img2)), img3)
 let pp = elem("p")
 discard elem("html", pp)
 eq("::before content",                 pEng.computedStyle(pp, "before").get("content"), "\"» \"")
-eq("::before color",                   pEng.computedStyle(pp, "before").get("color"), "gray")
-eq("p itself",                         pEng.computedStyle(pp).get("color"), "blue")
+eq("::before color",                   pEng.computedStyle(pp, "before").get("color"), "rgb(128, 128, 128)")
+eq("p itself",                         pEng.computedStyle(pp).get("color"), "rgb(0, 0, 255)")
 eq("in scope",                         pEng.computedStyle(img1).get("border-top-width"), "2px")
 eq("below scope limit",                pEng.computedStyle(img2).get("border-top-width"), "medium")
 eq("outside scope",                    pEng.computedStyle(img3).get("border-top-width"), "medium")
@@ -190,5 +190,14 @@ while hi < w.len and hi < 18:
   head.add w[hi]
   inc hi
 eq("why names the winner",             head, "color: red !import")
+
+echo "currentcolor:"
+let ccEng = newStyleEngine()
+ccEng.addStylesheet("div { color: rebeccapurple; border: 1px solid } span { color: currentcolor }")
+let ccS = elem("span")
+let ccD = elem("div", ccS)
+discard elem("html", ccD)
+eq("border colour = currentcolor",     ccEng.computedStyle(ccD).get("border-top-color"), "rgb(102, 51, 153)")
+eq("color: currentcolor inherits",     ccEng.computedStyle(ccS).get("color"), "rgb(102, 51, 153)")
 
 echo (if fails == 0: "computed: all ok" else: "computed: " & $fails & " FAIL")
