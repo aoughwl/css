@@ -57,3 +57,15 @@ for w in winners:
   if w.property == "margin": marginVal = w.value
 check("color (#id wins)",            colorVal, "blue")
 check("margin (later of equal spec)", marginVal, "10px")
+
+echo "specificity (Selectors-4, from the AST):"
+check(":nth-child of S",    $specificity("li:nth-child(2n of .x#y)"), "(1,2,1)")
+check(":nth-child plain",   $specificity(":nth-child(odd)"), "(0,1,0)")
+check("::slotted(X)",       $specificity("::slotted(span.x)"), "(0,1,2)")
+check(":host(X)",           $specificity(":host(.dark)"), "(0,2,0)")
+check(":has(> img)",        $specificity("a:has(> img.big)"), "(0,1,2)")
+check("nesting & is 0",     $specificity("&.x"), "(0,1,0)")
+check("escaped class",      $specificity(".a\\.b"), "(0,1,0)")
+check("namespaced type",    $specificity("svg|circle"), "(0,0,1)")
+check("attr w/ ns",         $specificity("[xlink|href]"), "(0,1,0)")
+check("vendor ::-webkit",   $specificity("input::-webkit-input-placeholder"), "(0,0,2)")

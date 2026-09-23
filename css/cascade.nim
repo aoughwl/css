@@ -22,8 +22,16 @@
 ##   specificity of their most specific argument, so `:not(#id)` is worth an
 ##   id. `:where()` contributes nothing at all, argument included.
 ##
-## Namespaces are ignored. The `of S` form of `:nth-child()` does not take its
-## argument into account.
+## `:nth-child(An+B of S)` is worth a pseudo-class PLUS its most specific `S`;
+## `::slotted(X)` and `:host(X)` are worth themselves plus `X`. The nesting
+## selector `&` counts as nothing here (it takes its parent rule's specificity,
+## which a lone selector string does not know). Namespaces are ignored.
+##
+## A valid selector is counted from its parsed AST (`css/selectors`), the same
+## tree validation and matching use; an invalid one falls back to a tolerant
+## character walk so a best-effort answer is still available.
+
+import selectors
 
 type Specificity* = object
   a*: int   ## id selectors
@@ -70,7 +78,7 @@ proc takesArgumentSpecificity(name: string): bool =
   name == "not" or name == "is" or name == "has" or name == "matches" or
     name == "any" or name == "-moz-any" or name == "-webkit-any"
 
-proc specificityOfRange(sel: string, start, stop: int): Specificity
+proc roughRange(sel: string, start, stop: int): Specificity
 
 proc specificityOne(sel: string, start, stop: int): Specificity =
   ## Count one complex selector occupying sel[start ..< stop].
@@ -125,7 +133,7 @@ proc specificityOne(sel: string, start, stop: int): Specificity =
       elif argStart >= 0 and takesArgumentSpecificity(name):
         # The pseudo itself is worth nothing; its argument is worth whatever
         # the most specific thing inside it is worth.
-        let inner = specificityOfRange(sel, argStart, argStop)
+        let inner = roughRange(sel, argStart, argStop)
         result.a = result.a + inner.a
         result.b = result.b + inner.b
         result.c = result.c + inner.c
@@ -140,7 +148,7 @@ proc specificityOne(sel: string, start, stop: int): Specificity =
     else:
       inc i                     # combinators, whitespace, commas
 
-proc specificityOfRange(sel: string, start, stop: int): Specificity =
+proc roughRange(sel: string, start, stop: int): Specificity =
   ## Highest specificity across a comma-separated list inside sel[start..<stop].
   result = Specificity(a: 0, b: 0, c: 0)
   var i = start
@@ -162,9 +170,59 @@ proc specificityOfRange(sel: string, start, stop: int): Specificity =
       segStart = i + 1
     inc i
 
+proc add(x: var Specificity, y: Specificity) =
+  x.a = x.a + y.a
+  x.b = x.b + y.b
+  x.c = x.c + y.c
+
+proc ofList*(list: SelectorList): Specificity
+proc ofComplex*(c: Complex): Specificity
+
+proc ofSimple(sp: Simple): Specificity =
+  result = Specificity(a: 0, b: 0, c: 0)
+  case sp.kind
+  of skId: result.a = 1
+  of skClass, skAttr: result.b = 1
+  of skType: result.c = 1
+  of skUniversal, skNesting: discard
+  of skPseudoElement:
+    result.c = 1
+    if sp.name == "slotted" and sp.sub.len > 0: result.add ofList(sp.sub)
+  of skPseudoClass:
+    if sp.name == "where":
+      discard
+    elif takesArgumentSpecificity(sp.name):
+      result = ofList(sp.sub)
+    else:
+      result.b = 1
+      if sp.sub.len > 0:        # :nth-child(… of S), :host(X), :host-context(X)
+        result.add ofList(sp.sub)
+
+proc ofComplex*(c: Complex): Specificity =
+  ## Specificity of one parsed complex selector.
+  result = Specificity(a: 0, b: 0, c: 0)
+  var i = 0
+  while i < c.compounds.len:
+    var j = 0
+    while j < c.compounds[i].simples.len:
+      result.add ofSimple(c.compounds[i].simples[j])
+      inc j
+    inc i
+
+proc ofList*(list: SelectorList): Specificity =
+  ## The most specific item of a parsed selector list.
+  result = Specificity(a: 0, b: 0, c: 0)
+  var i = 0
+  while i < list.len:
+    let one = ofComplex(list[i])
+    if i == 0 or result < one: result = one
+    inc i
+
 proc specificity*(sel: string): Specificity =
   ## Highest specificity across a comma-separated selector list.
-  specificityOfRange(sel, 0, sel.len)
+  let r = parseSelector(sel, true)
+  if r.ok: ofList(r.list)
+  else: roughRange(sel, 0, sel.len)
 
 type Decl* = object
   selector*: string
