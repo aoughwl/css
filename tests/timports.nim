@@ -69,6 +69,6 @@ eng.addStylesheet(r.css)
 let h = elem("h1")
 discard elem("html", elem("body", h))
 check("imported h1 rule applies",         eng.computedStyle(h).get("font-size") == "32px", true)
-check("layered import loses to unlayered", eng.computedStyle(h).get("color") == "red", true)
+check("layered import loses to unlayered", eng.computedStyle(h).get("color") == "rgb(255, 0, 0)", true)
 
 echo (if fails == 0: "imports: all ok" else: "imports: " & $fails & " FAIL")
