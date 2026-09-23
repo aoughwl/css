@@ -69,3 +69,10 @@ check("escaped class",      $specificity(".a\\.b"), "(0,1,0)")
 check("namespaced type",    $specificity("svg|circle"), "(0,0,1)")
 check("attr w/ ns",         $specificity("[xlink|href]"), "(0,1,0)")
 check("vendor ::-webkit",   $specificity("input::-webkit-input-placeholder"), "(0,0,2)")
+
+echo "cascade with !important:"
+let w2 = cascade(@[
+  Decl(selector: "#id", property: "color", value: "blue"),
+  Decl(selector: "p", property: "color", value: "red", important: true),
+  Decl(selector: "#x #y", property: "color", value: "green")])
+check("!important beats specificity", w2[0].value, "red")

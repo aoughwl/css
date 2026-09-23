@@ -228,17 +228,20 @@ type Decl* = object
   selector*: string
   property*: string
   value*: string
+  important*: bool       ## `!important`: beats every normal declaration
 
 type Winner* = object
   property*: string
   value*: string
   spec*: Specificity
   order*: int
+  important*: bool
 
 proc cascade*(decls: openArray[Decl]): seq[Winner] =
-  ## Resolve declarations to the winning value per property. A later declaration
-  ## wins over an earlier one of equal specificity (source order); higher
-  ## specificity always wins.
+  ## Resolve declarations to the winning value per property: an `!important`
+  ## declaration beats every normal one; then higher specificity wins; then
+  ## the later declaration. (For origins, layers, inheritance and element
+  ## matching, use `css/computed`.)
   result = @[]
   var order = 0
   for d in decls:
@@ -249,10 +252,14 @@ proc cascade*(decls: openArray[Decl]): seq[Winner] =
       if result[j].property == d.property:
         found = j
       inc j
+    let w = Winner(property: d.property, value: d.value, spec: sp, order: order,
+                   important: d.important)
     if found < 0:
-      result.add Winner(property: d.property, value: d.value, spec: sp, order: order)
+      result.add w
     else:
       let cur = result[found]
-      if cur.spec < sp or (cur.spec == sp and cur.order <= order):
-        result[found] = Winner(property: d.property, value: d.value, spec: sp, order: order)
+      if d.important != cur.important:
+        if d.important: result[found] = w
+      elif cur.spec < sp or (cur.spec == sp and cur.order <= order):
+        result[found] = w
     inc order

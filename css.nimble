@@ -1,7 +1,7 @@
 # Package
-version     = "0.1.0"
+version     = "0.2.0"
 author      = "aoughwl"
-description = "MDN-typed CSS validator + stylesheet parser for nimony / Nim 3.0 — value, function, selector and cascade validation, plus a substrate-free `style X:` DSL."
+description = "A CSS engine for nimony / Nim 3.0: MDN-typed validation of values, selectors and at-rules, a whole-stylesheet linter, selector matching, the cascade with computed values, @import resolution, colours, and a minifier."
 license     = "MIT"
 srcDir      = "."
 
