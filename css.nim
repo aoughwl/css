@@ -22,4 +22,5 @@ import css/cascade
 import css/data_load
 import css/styleval
 import css/stylesheet
-export validator, selectors, cascade, data_load, styleval, stylesheet
+import css/parse
+export validator, selectors, cascade, data_load, styleval, stylesheet, parse

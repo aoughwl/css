@@ -41,6 +41,13 @@ type
     text: string      ## kw/lit text, or primitive name
     kids: seq[int]
     target: int       ## opRef → root id of the referenced grammar
+    fnames: seq[string]  ## opFuncTok: the function names this slot accepts
+                         ## (lowered; empty = any function)
+    argRoot: int      ## opFuncTok from an inline `name( arg )`: compiled arg
+                      ## grammar, checked recursively at lvFull (-1 = none)
+    hasLo, hasHi: bool   ## numeric range `<length [0,∞]>` on this node
+    rlo, rhi: float
+    rdesc: string        ## the range as written, "[0,∞]", for messages
 
 var arena: seq[CNode] = @[]
 var roots = initTable[string, int]()
@@ -48,7 +55,11 @@ var roots = initTable[string, int]()
 const primNames = ["length", "percentage", "number", "integer", "angle", "time",
   "frequency", "resolution", "flex", "string", "hex-color", "custom-ident",
   "dashed-ident", "ident", "custom-property-name", "keyframes-name", "url",
-  "dimension", "declaration-value", "any-value", "declaration-list"]
+  "dimension", "declaration-value", "any-value", "declaration-list",
+  # token-level names MDN uses without defining them as syntaxes
+  "x", "y", "zero", "unicode-range-token", "urange", "ident-token",
+  "string-token", "hash-token", "function-token", "attr-name",
+  "intrinsic-size-keyword", "top", "right", "bottom", "left"]
 
 func isPrimName(name: string): bool =
   var i = 0
@@ -75,6 +86,77 @@ func lowerStr(s: string): string =
 
 proc compileVNode(v: VNode): int
 proc getGrammar(key, src: string): int
+proc normalizeCommas(v: VNode): VNode
+proc addFuncNames(s: string, dest: var HashSet[string])
+
+func parseNumSafe(s: string): float =
+  ## Non-raising decimal parse of a CSS number ("-1.5", "+.5", "2e3").
+  var i = 0
+  var neg = false
+  if i < s.len and (s[i] == '-' or s[i] == '+'):
+    neg = s[i] == '-'
+    inc i
+  var r = 0.0
+  while i < s.len and s[i] >= '0' and s[i] <= '9':
+    r = r * 10.0 + float(ord(s[i]) - ord('0'))
+    inc i
+  if i < s.len and s[i] == '.':
+    inc i
+    var scale = 0.1
+    while i < s.len and s[i] >= '0' and s[i] <= '9':
+      r = r + float(ord(s[i]) - ord('0')) * scale
+      scale = scale * 0.1
+      inc i
+  if i < s.len and (s[i] == 'e' or s[i] == 'E'):
+    inc i
+    var eneg = false
+    if i < s.len and (s[i] == '-' or s[i] == '+'):
+      eneg = s[i] == '-'
+      inc i
+    var e = 0
+    while i < s.len and s[i] >= '0' and s[i] <= '9':
+      e = e * 10 + (ord(s[i]) - ord('0'))
+      inc i
+    while e > 0:
+      r = (if eneg: r / 10.0 else: r * 10.0)
+      dec e
+  if neg: -r else: r
+
+func isBound(s: string): bool =
+  ## A written range bound that actually bounds: not empty, not ±∞.
+  if s.len == 0: return false
+  var i = 0
+  while i < s.len:
+    if s[i] >= '0' and s[i] <= '9': return true
+    inc i
+  false
+
+proc withRange(n: CNode, v: VNode): CNode =
+  result = n
+  if v.kind == nkType:
+    result.rdesc = "[" & v.rmin & "," & v.rmax & "]"
+    if isBound(v.rmin):
+      result.hasLo = true
+      result.rlo = parseNumSafe(v.rmin)
+    if isBound(v.rmax):
+      result.hasHi = true
+      result.rhi = parseNumSafe(v.rmax)
+
+proc funcSlotNames(typeName: string): seq[string] =
+  ## `<rgb()>` names a syntax whose alternatives may be SEVERAL functions
+  ## (`rgb( … ) | rgba( … )`); the slot accepts any of them.
+  result = @[]
+  var base = ""
+  var i = 0
+  while i < typeName.len - 2:
+    base.add typeName[i]
+    inc i
+  result.add lowerStr(base)
+  if isSyntax(typeName):
+    var hs = initHashSet[string]()
+    addFuncNames(syntaxOf(typeName), hs)
+    for x in hs:
+      if x != result[0]: result.add x
 
 proc compileVNode(v: VNode): int =
   case v.kind
@@ -85,14 +167,15 @@ proc compileVNode(v: VNode): int =
     result = allocNode CNode(op: opLit, text: v.text, mult: v.mult, lo: v.lo, hi: v.hi)
   of nkType:
     if endsParens(v.name):
-      result = allocNode CNode(op: opFuncTok, text: v.name, mult: v.mult, lo: v.lo, hi: v.hi)
+      result = allocNode CNode(op: opFuncTok, text: v.name, mult: v.mult, lo: v.lo, hi: v.hi,
+                               fnames: funcSlotNames(v.name), argRoot: -1)
     elif isPrimName(v.name):
-      result = allocNode CNode(op: opPrim, text: v.name, mult: v.mult, lo: v.lo, hi: v.hi)
+      result = allocNode withRange(CNode(op: opPrim, text: v.name, mult: v.mult, lo: v.lo, hi: v.hi, argRoot: -1), v)
     elif isSyntax(v.name):
       let t = getGrammar("s:" & v.name, syntaxOf(v.name))
-      result = allocNode CNode(op: opRef, target: t, text: v.name, mult: v.mult, lo: v.lo, hi: v.hi)
+      result = allocNode withRange(CNode(op: opRef, target: t, text: v.name, mult: v.mult, lo: v.lo, hi: v.hi, argRoot: -1), v)
     else:
-      result = allocNode CNode(op: opPrim, text: "*any*", mult: v.mult, lo: v.lo, hi: v.hi)
+      result = allocNode CNode(op: opPrim, text: "*any*", mult: v.mult, lo: v.lo, hi: v.hi, argRoot: -1)
   of nkProp:
     if isProperty(v.name):
       let t = getGrammar("p:" & v.name, propertySyntax(v.name))
@@ -100,7 +183,12 @@ proc compileVNode(v: VNode): int =
     else:
       result = allocNode CNode(op: opPrim, text: "*any*", mult: v.mult, lo: v.lo, hi: v.hi)
   of nkFunc:
-    result = allocNode CNode(op: opFuncTok, text: v.fname, mult: v.mult, lo: v.lo, hi: v.hi)
+    # Reserve the slot first: the argument grammar is compiled into the arena
+    # after it, and may itself contain functions.
+    result = allocNode CNode(op: opFuncTok, text: v.fname, mult: v.mult, lo: v.lo, hi: v.hi,
+                             fnames: @[lowerStr(v.fname)], argRoot: -1)
+    let a = compileVNode(normalizeCommas(v.arg))
+    arena[result].argRoot = a
   of nkList:
     var kidIds: seq[int] = @[]
     var i = 0
@@ -220,6 +308,26 @@ func newUsed(n: int): seq[bool] =
 
 proc matchNode(id, pos: int): seq[int]
 proc matchOne(id, pos: int): seq[int]
+proc subMatch(root: int, args: string): bool
+
+type Level* = enum
+  lvValues    ## whole-value grammar match only (fast — the tier peers stop at)
+  lvFull      ## + recursive math checking + strict function-argument grammars
+
+var gLevel = lvFull
+
+proc isNumericFunc(name: string): bool =
+  ## A function that can stand where a number/length/angle/… is wanted: the
+  ## math functions (their own checker validates the inside), plus the
+  ## substitution functions whose result type is only known at used-value time.
+  let l = lowerStr(name)
+  isMathFunc(l) or l == "var" or l == "env" or l == "attr" or l == "calc-size" or
+    l == "progress" or l == "random" or l == "sibling-index" or
+    l == "sibling-count" or l == "if" or l == "-webkit-calc" or l == "-moz-calc"
+
+func isCssWideKeyword(l: string): bool =
+  l == "inherit" or l == "initial" or l == "unset" or l == "revert" or
+    l == "revert-layer" or l == "default"
 
 proc matchPrim(name: string, pos: int): seq[int] =
   if pos >= gToks.len:
@@ -230,29 +338,32 @@ proc matchPrim(name: string, pos: int): seq[int] =
     return @[pos+1]
   if name == "declaration-value" or name == "any-value" or name == "declaration-list":
     return @[gToks.len]
+  let fnum = t.kind == vtFunc and isNumericFunc(t.text)
   var ok = false
   case name
   of "length":
     ok = (t.kind == vtDimension and unitDimension(t.text) == "length") or
-         (t.kind == vtNumber and isZeroNum(t.num)) or t.kind == vtFunc
+         (t.kind == vtNumber and isZeroNum(t.num)) or fnum
   of "percentage":
-    ok = t.kind == vtPercent or t.kind == vtFunc
-  of "number":
-    ok = t.kind == vtNumber or t.kind == vtFunc
+    ok = t.kind == vtPercent or fnum
+  of "number", "x", "y":
+    ok = t.kind == vtNumber or fnum
+  of "zero":
+    ok = t.kind == vtNumber and isZeroNum(t.num)
   of "integer":
-    ok = (t.kind == vtNumber and isIntNum(t.num)) or t.kind == vtFunc
+    ok = (t.kind == vtNumber and isIntNum(t.num)) or fnum
   of "angle":
     ok = (t.kind == vtDimension and unitDimension(t.text) == "angle") or
-         (t.kind == vtNumber and isZeroNum(t.num)) or t.kind == vtFunc
+         (t.kind == vtNumber and isZeroNum(t.num)) or fnum
   of "time":
-    ok = (t.kind == vtDimension and unitDimension(t.text) == "time") or t.kind == vtFunc
+    ok = (t.kind == vtDimension and unitDimension(t.text) == "time") or fnum
   of "frequency":
-    ok = (t.kind == vtDimension and unitDimension(t.text) == "frequency") or t.kind == vtFunc
+    ok = (t.kind == vtDimension and unitDimension(t.text) == "frequency") or fnum
   of "resolution":
-    ok = (t.kind == vtDimension and unitDimension(t.text) == "resolution") or t.kind == vtFunc
+    ok = (t.kind == vtDimension and unitDimension(t.text) == "resolution") or fnum
   of "flex":
-    ok = t.kind == vtDimension and unitDimension(t.text) == "flex"
-  of "string":
+    ok = (t.kind == vtDimension and unitDimension(t.text) == "flex") or fnum
+  of "string", "string-token":
     ok = t.kind == vtString
   of "hex-color":
     # A hash token is not a colour by itself. `#ff` and `#main` both lex as
@@ -260,12 +371,32 @@ proc matchPrim(name: string, pos: int): seq[int] =
     # not a colour in any CSS, and a renderer that trusted this would paint
     # something arbitrary rather than skip the declaration.
     ok = t.kind == vtHash and isHexColorBody(t.text)
-  of "custom-ident", "dashed-ident", "ident", "custom-property-name", "keyframes-name":
+  of "hash-token":
+    ok = t.kind == vtHash
+  of "custom-ident", "keyframes-name":
+    # <custom-ident> excludes the CSS-wide keywords and `default`: they would be
+    # ambiguous with the keyword meaning wherever an author name may appear.
+    ok = t.kind == vtIdent and not isCssWideKeyword(gLower[pos])
+  of "dashed-ident", "custom-property-name":
+    ok = t.kind == vtIdent and t.text.len > 2 and t.text[0] == '-' and t.text[1] == '-'
+  of "ident", "ident-token", "attr-name":
     ok = t.kind == vtIdent
+  of "intrinsic-size-keyword":
+    ok = t.kind == vtIdent and (gLower[pos] == "auto" or gLower[pos] == "min-content" or
+         gLower[pos] == "max-content" or gLower[pos] == "fit-content")
+  of "top", "right", "bottom", "left":
+    ok = (t.kind == vtDimension and unitDimension(t.text) == "length") or
+         (t.kind == vtNumber and isZeroNum(t.num)) or fnum or
+         (t.kind == vtIdent and gLower[pos] == "auto")
   of "url":
-    ok = t.kind == vtFunc or t.kind == vtString
+    ok = t.kind == vtString or
+         (t.kind == vtFunc and (lowerStr(t.text) == "url" or lowerStr(t.text) == "src"))
   of "dimension":
-    ok = t.kind == vtDimension
+    ok = t.kind == vtDimension or fnum
+  of "unicode-range-token", "urange":
+    ok = t.kind == vtURange
+  of "function-token":
+    ok = t.kind == vtFunc
   else:
     ok = false
   if ok: return @[pos+1]
@@ -344,17 +475,33 @@ proc matchOne(id, pos: int): seq[int] =
       result = @[pos+1]
     elif n.text == "," and pos < gToks.len and gToks[pos].kind == vtComma:
       result = @[pos+1]
+    elif pos < gToks.len and gToks[pos].kind == vtDelim and gToks[pos].text == n.text:
+      result = @[pos+1]             # a quoted literal: '[' ']' '+' …
     else:
       expect(pos, "'" & n.text & "'")
       result = @[]
   of opPrim:
     result = matchPrim(n.text, pos)
   of opFuncTok:
+    result = @[]
     if pos < gToks.len and gToks[pos].kind == vtFunc:
-      result = @[pos+1]
+      let fname = lowerStr(gToks[pos].text)
+      var named = n.fnames.len == 0 or fname == "var" or fname == "env"
+      var k = 0
+      while not named and k < n.fnames.len:
+        if n.fnames[k] == fname: named = true
+        inc k
+      if not named:
+        expect(pos, n.text & (if endsParens(n.text): "" else: "()"))
+      elif n.argRoot >= 0 and gLevel == lvFull and fname != "var" and fname != "env":
+        # an inline `name( arg )`: its arguments have a grammar right here, so
+        # check them now (nested match, own state) — `fit-content(red)` fails.
+        if subMatch(n.argRoot, gToks[pos].args): result = @[pos+1]
+        else: expect(pos, "valid arguments to " & n.text & "()")
+      else:
+        result = @[pos+1]
     else:
-      expect(pos, "a function")
-      result = @[]
+      expect(pos, (if n.fnames.len > 0: n.fnames[0] & "()" else: "a function"))
   of opRef:
     result = matchNode(n.target, pos)
   of opSeq:
@@ -381,6 +528,26 @@ proc matchOne(id, pos: int): seq[int] =
   of opAll:
     result = matchOrderless(n.kids, newUsed(n.kids.len), pos, true, 0)
 
+proc rangeFilter(id, pos: int, ends: seq[int]): seq[int] =
+  ## `<length [0,∞]>`: drop any single-token match whose literal number falls
+  ## outside the range. A function (calc()…) is left alone — its value is only
+  ## known at computed-value time, and CSS clamps it rather than rejecting it.
+  result = @[]
+  let n = arena[id]
+  var i = 0
+  while i < ends.len:
+    let e = ends[i]
+    var ok = true
+    if e == pos + 1 and pos < gToks.len:
+      let t = gToks[pos]
+      if t.kind == vtNumber or t.kind == vtDimension or t.kind == vtPercent:
+        let v = parseNumSafe(t.num)
+        if (n.hasLo and v < n.rlo) or (n.hasHi and v > n.rhi):
+          ok = false
+          expect(pos, "a " & n.text & " in the range " & n.rdesc)
+    if ok: result.add e
+    inc i
+
 proc matchNode(id, pos: int): seq[int] =
   let key = id * 100000 + pos
   if gMemo.hasKey(key): return gMemo.getOrDefault(key, @[])
@@ -403,8 +570,53 @@ proc matchNode(id, pos: int): seq[int] =
     result = repeat(id, pos, arena[id].lo, arena[id].hi, false)
   of mkHashRange:
     result = repeat(id, pos, arena[id].lo, arena[id].hi, true)
+  if arena[id].hasLo or arena[id].hasHi:
+    result = rangeFilter(id, pos, result)
   gInprog.excl key
   gMemo[key] = result
+
+proc subMatch(root: int, args: string): bool =
+  ## Match `args` against compiled grammar `root` as a whole, from inside a
+  ## running match: the matcher's state is global, so save it, run a fresh
+  ## match, and restore — the outer match continues exactly where it was.
+  let savedToks = gToks
+  let savedLower = gLower
+  let savedMemo = gMemo
+  let savedErrPos = gErrPos
+  let savedExpected = gExpected
+  let savedTrack = gTrack
+  let savedInprog = gInprog
+  gInprog = initHashSet[int]()
+  let toks = lexValue(args)
+  gToks = toks
+  gLower = @[]
+  var i = 0
+  while i < toks.len:
+    if toks[i].kind == vtIdent: gLower.add lowerStr(toks[i].text)
+    else: gLower.add ""
+    inc i
+  gMemo = initTable[int, seq[int]]()
+  gTrack = false
+  result = false
+  var hasSubst = false
+  i = 0
+  while i < toks.len:
+    if toks[i].kind == vtFunc:
+      let l = lowerStr(toks[i].text)
+      if l == "var" or l == "env": hasSubst = true
+    inc i
+  if hasSubst:
+    result = true        # var() may expand to any token run: can't check
+  else:
+    for e in matchNode(root, 0):
+      if e == toks.len: result = true
+  gToks = savedToks
+  gLower = savedLower
+  gMemo = savedMemo
+  gErrPos = savedErrPos
+  gExpected = savedExpected
+  gTrack = savedTrack
+  gInprog = savedInprog
 
 # `repeat`, `matchOne`, `matchOrderless` reference each other and `matchNode`;
 # nimony resolves the forward use of `matchOne`/`matchNode` above.
@@ -450,6 +662,7 @@ proc buildFuncVocab(): HashSet[string] =
   result = initHashSet[string]()
   addFuncNames(cssSyntaxBlob, result)
   addFuncNames(cssPropertyBlob, result)
+  addFuncNames(cssDescriptorBlob, result)
 
 let funcVocab = buildFuncVocab()
 
@@ -650,20 +863,16 @@ proc describeTok(t: VTok): string =
   of vtPercent: "'" & t.num & "%'"
   of vtString: "a string"
   of vtHash: "'#" & t.text & "'"
-  of vtFunc: "'" & t.text & "(…)'"
+  of vtFunc: "'" & t.text & (if t.args.len <= 32: "(" & t.args & ")'" else: "(…)'")
   of vtComma: "','"
   of vtSlash: "'/'"
   of vtDelim: "'" & t.text & "'"
+  of vtURange: "'U+" & t.text & "'"
 
 # ---------------------------------------------------------------------------
 # validation levels — trade coverage for speed, 1:1 with what other tools do
 # ---------------------------------------------------------------------------
 
-type Level* = enum
-  lvValues    ## whole-value grammar match only (fast — the tier peers stop at)
-  lvFull      ## + recursive math checking + strict function-argument grammars
-
-var gLevel = lvFull
 proc setLevel*(l: Level) = gLevel = l
 proc level*(): Level = gLevel
 
@@ -681,12 +890,14 @@ proc resetMatch(toks: seq[VTok]) =
   gErrPos = 0
   gExpected = @[]
 
-proc valueMatchesToks(prop: string, toks: seq[VTok]): bool =
+proc matchesRoot(root: int, toks: seq[VTok]): bool =
   resetMatch(toks)
-  let root = getGrammar("p:" & prop, propertySyntax(prop))
   for e in matchNode(root, 0):
     if e == toks.len: return true
   false
+
+proc valueMatchesToks(prop: string, toks: seq[VTok]): bool =
+  matchesRoot(getGrammar("p:" & prop, propertySyntax(prop)), toks)
 
 proc valueMatches*(prop, value: string): bool =
   let toks = lexValue(value)
@@ -744,30 +955,21 @@ proc splitImportant(value: string): tuple[v: string, important: bool] =
     inc i
   (v, true)
 
-proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
-  var prop = prop
-  # `!important` belongs to the declaration, not the value — strip it before any
-  # value check runs. A value that is ONLY `!important` has nothing left to
-  # validate, so it stays empty and falls into the "empty value" arm below.
-  let (value, isImportant) = splitImportant(value)
-  discard isImportant
-  if not isProperty(prop):
-    if isVendorProperty(prop):
-      return (true, "")              # browser-prefixed property: accept, uncheckable
-    elif lower(prop) == "color-adjust" and isProperty("print-color-adjust"):
-      prop = "print-color-adjust"    # deprecated alias for print-color-adjust
-    else:
-      return (false, prop & " is not a known CSS property")
+proc checkValue(rootKey, rootSrc, value: string, allowWide: bool):
+    tuple[valid: bool, error: string] =
+  ## Validate `value` against the grammar `rootSrc` (compiled once under
+  ## `rootKey`). `allowWide` admits the CSS-wide keywords — true for a
+  ## property, false for an at-rule descriptor, where `inherit` means nothing.
   # Lex the value ONCE and share the tokens across every check below (the value
   # lexer collapses nested functions to single opaque tokens, so a var()/env() or
   # function seen here is at the value's top level).
   let toks = lexValue(value)
   if toks.len == 0:
     return (false, "empty value")
-  if toks.len == 1 and toks[0].kind == vtIdent and isGlobalKeyword(toks[0].text):
+  if allowWide and toks.len == 1 and toks[0].kind == vtIdent and isGlobalKeyword(toks[0].text):
     return (true, "")                # inherit / initial / unset / revert
   # A lone browser-prefixed keyword value (-webkit-sticky, -moz-max-content, …).
-  if toks.len == 1 and toks[0].kind == vtIdent and isVendorProperty(toks[0].text):
+  if allowWide and toks.len == 1 and toks[0].kind == vtIdent and isVendorProperty(toks[0].text):
     return (true, "")
   var hasFn = false
   var i = 0
@@ -789,11 +991,12 @@ proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
   # …then the whole-value grammar match (reusing the tokens we already lexed).
   # First pass with error-tracking OFF (fast); only if it fails do we re-run with
   # tracking ON to phrase a precise farthest-failure message.
+  let root = getGrammar(rootKey, rootSrc)
   gTrack = false
-  if valueMatchesToks(prop, toks):
+  if matchesRoot(root, toks):
     return (true, "")
   gTrack = true
-  discard valueMatchesToks(prop, toks)
+  discard matchesRoot(root, toks)
   # build a farthest-failure message from the last match attempt
   var got = "end of value"
   if gErrPos < gToks.len: got = describeTok(gToks[gErrPos])
@@ -806,3 +1009,50 @@ proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
   if gExpected.len > 6: exp.add " | …"
   if exp.len == 0: exp = "a valid value"
   (false, "at token " & $(gErrPos + 1) & ": expected " & exp & ", got " & got)
+
+proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
+  ## Validate `value` against property `prop`'s MDN grammar. A custom property
+  ## (`--x`) accepts any non-empty token run.
+  var prop = prop
+  # `!important` belongs to the declaration, not the value — strip it before any
+  # value check runs. A value that is ONLY `!important` has nothing left to
+  # validate, so it stays empty and falls into the "empty value" arm below.
+  let (value, isImportant) = splitImportant(value)
+  discard isImportant
+  if prop.len > 2 and prop[0] == '-' and prop[1] == '-':
+    return (true, "")                # custom property: <declaration-value>?
+  if not isProperty(prop):
+    if isVendorProperty(prop):
+      return (true, "")              # browser-prefixed property: accept, uncheckable
+    elif lower(prop) == "color-adjust" and isProperty("print-color-adjust"):
+      prop = "print-color-adjust"    # deprecated alias for print-color-adjust
+    elif isProperty(lower(prop)):
+      prop = lower(prop)             # property names are ASCII case-insensitive
+    else:
+      return (false, prop & " is not a known CSS property")
+  checkValue("p:" & prop, propertySyntax(prop), value, true)
+
+proc validateAgainst*(syntax, value: string): tuple[valid: bool, error: string] =
+  ## Validate `value` against an arbitrary value-definition syntax — an at-rule
+  ## descriptor's grammar, a registered `@property` syntax, or your own
+  ## (`validateAgainst("<length> | auto", "10px")`). CSS-wide keywords are NOT
+  ## implicitly accepted; write them into the syntax if you want them.
+  checkValue("x:" & syntax, syntax, value, false)
+
+proc matchesSyntax*(syntax, value: string): bool =
+  ## Boolean form of `validateAgainst`, without error bookkeeping.
+  let toks = lexValue(value)
+  if toks.len == 0: return false
+  gTrack = false
+  matchesRoot(getGrammar("x:" & syntax, syntax), toks)
+
+proc validateDescriptor*(atRule, name, value: string): tuple[valid: bool, error: string] =
+  ## Validate a descriptor inside an at-rule block (`@font-face { src: … }`)
+  ## against its MDN descriptor grammar. `atRule` includes the `@`.
+  let (v, imp) = splitImportant(value)
+  if imp:
+    return (false, "!important is not allowed on an " & atRule & " descriptor")
+  let syn = descriptorSyntax(atRule, lower(name))
+  if syn.len == 0:
+    return (false, "'" & name & "' is not a descriptor of " & atRule)
+  checkValue("d:" & atRule & "/" & lower(name), syn, v, false)

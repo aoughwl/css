@@ -44,6 +44,8 @@ type
   VNode* = ref object
     mult*: Mult
     lo*, hi*: int         ## for mkRange (hi < 0 means unbounded)
+    rmin*, rmax*: string  ## nkType numeric range `<length [0,∞]>`: bounds as
+                          ## written ("" = unbounded; "∞"/"-∞" also unbounded)
     case kind*: NodeKind
     of nkKeyword, nkLiteral:
       text*: string
@@ -66,11 +68,12 @@ type
   GTokKind = enum
     gtIdent, gtType, gtProp, gtBar, gtDbar, gtAmp,
     gtLBrack, gtRBrack, gtLParen, gtRParen, gtComma, gtSlash,
-    gtStar, gtPlus, gtQues, gtHash, gtBang, gtBrace, gtEof
+    gtStar, gtPlus, gtQues, gtHash, gtBang, gtBrace, gtLit, gtEof
   GTok = object
     kind: GTokKind
     text: string
     lo, hi: int
+    rmin, rmax: string    ## gtType: the " [min,max]" range, if written
 
 func isIdentCh(c: char): bool =
   (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or
@@ -122,15 +125,25 @@ proc lexGrammar(src: string): seq[GTok] =
         while i < n and src[i] != '>':
           inner.add src[i]; inc i
         if i < n: inc i          # closing >
-        # split off " [range]" if present
+        # split off " [range]" if present, keeping its bounds
         var nm = inner
+        var rmin = ""
+        var rmax = ""
         var b = 0
         while b < inner.len and inner[b] != '[': inc b
         if b < inner.len:
           nm = ""
           var k = 0
           while k < b: nm.add inner[k]; inc k
-        result.add GTok(kind: gtType, text: stripSpaces(nm))
+          k = b + 1
+          var stage = 0
+          while k < inner.len and inner[k] != ']':
+            let ch = inner[k]
+            if ch == ',': stage = 1
+            elif ch != ' ':
+              if stage == 0: rmin.add ch else: rmax.add ch
+            inc k
+        result.add GTok(kind: gtType, text: stripSpaces(nm), rmin: rmin, rmax: rmax)
     elif c == '|':
       if i+1 < n and src[i+1] == '|':
         result.add GTok(kind: gtDbar); i += 2
@@ -195,6 +208,14 @@ proc lexGrammar(src: string): seq[GTok] =
       while i < n and isIdentCh(src[i]):
         w.add src[i]; inc i
       result.add GTok(kind: gtIdent, text: w)
+    elif c == '\'':
+      # a quoted literal token that must appear verbatim: '[' ']' '+' '>' …
+      inc i
+      var lit = ""
+      while i < n and src[i] != '\'':
+        lit.add src[i]; inc i
+      if i < n: inc i            # closing '
+      result.add GTok(kind: gtLit, text: lit)
     else:
       inc i                      # skip anything unrecognized
   result.add GTok(kind: gtEof)
@@ -221,7 +242,7 @@ func combPrec(k: GTokKind): int =
 
 func startsPrimary(k: GTokKind): bool =
   case k
-  of gtIdent, gtType, gtProp, gtLBrack, gtSlash, gtComma: true
+  of gtIdent, gtType, gtProp, gtLBrack, gtSlash, gtComma, gtLit: true
   else: false
 
 func combOf(k: GTokKind): Comb =
@@ -241,14 +262,18 @@ proc parsePrimary(p: var Parser): VNode =
     # function?  ident immediately followed by (
     if p.peek.kind == gtLParen:
       discard p.advance                 # (
-      let a = parseExpr(p, 0)
+      var a: VNode
+      if p.peek.kind == gtRParen:        # `name()` — no arguments at all
+        a = VNode(kind: nkList, comb: cbSeq, kids: @[], mult: mkOne)
+      else:
+        a = parseExpr(p, 0)
       if p.peek.kind == gtRParen: discard p.advance
       result = VNode(kind: nkFunc, fname: t.text, arg: a, mult: mkOne)
     else:
       result = VNode(kind: nkKeyword, text: t.text, mult: mkOne)
   of gtType:
     discard p.advance
-    result = VNode(kind: nkType, name: t.text, mult: mkOne)
+    result = VNode(kind: nkType, name: t.text, mult: mkOne, rmin: t.rmin, rmax: t.rmax)
   of gtProp:
     discard p.advance
     result = VNode(kind: nkProp, name: t.text, mult: mkOne)
@@ -258,6 +283,9 @@ proc parsePrimary(p: var Parser): VNode =
   of gtComma:
     discard p.advance
     result = VNode(kind: nkLiteral, text: ",", mult: mkOne)
+  of gtLit:
+    discard p.advance
+    result = VNode(kind: nkLiteral, text: t.text, mult: mkOne)
   of gtLBrack:
     discard p.advance
     result = parseExpr(p, 0)
@@ -351,8 +379,13 @@ func combStr(c: Comb): string =
 proc render*(n: VNode): string =
   case n.kind
   of nkKeyword: result = n.text
-  of nkLiteral: result = n.text
-  of nkType: result = "<" & n.name & ">"
+  of nkLiteral:
+    result = (if n.text == "/" or n.text == ",": n.text else: "'" & n.text & "'")
+  of nkType:
+    if n.rmin.len > 0 or n.rmax.len > 0:
+      result = "<" & n.name & " [" & n.rmin & "," & n.rmax & "]>"
+    else:
+      result = "<" & n.name & ">"
   of nkProp: result = "<'" & n.name & "'>"
   of nkFunc: result = n.fname & "( " & render(n.arg) & " )"
   of nkList:

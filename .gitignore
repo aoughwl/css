@@ -11,3 +11,4 @@ nifcache/
 # editor / os
 *.swp
 .DS_Store
+/css/tools/gen_data

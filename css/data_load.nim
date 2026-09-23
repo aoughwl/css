@@ -37,6 +37,10 @@ let cssUnits*      = parseBlob(cssUnitBlob)      ## unit -> dimension bucket (le
 let cssAtRules*    = parseBlob(cssAtRuleBlob)    ## @rule -> syntax
 let cssPseudoClasses*  = parseBlob(cssPseudoClassBlob)    ## pseudo-class name (no `:`) -> "1" if functional
 let cssPseudoElements* = parseBlob(cssPseudoElementBlob)  ## pseudo-element name (no `::`) -> "1" if functional
+let cssDescriptors* = parseBlob(cssDescriptorBlob)  ## "@rule/descriptor" -> value-definition syntax
+let cssInherited*   = parseBlob(cssInheritedBlob)   ## property -> "1" when it inherits by default
+let cssInitials*    = parseBlob(cssInitialBlob)     ## longhand -> MDN initial value (may be prose)
+let cssLonghands*   = parseBlob(cssLonghandBlob)    ## shorthand -> space-separated longhands
 
 # --- accessors -------------------------------------------------------------
 
@@ -57,3 +61,30 @@ proc isPseudoClass*(name: string): bool = cssPseudoClasses.hasKey(name)
 proc isPseudoElement*(name: string): bool = cssPseudoElements.hasKey(name)
 proc isFunctionalPseudoClass*(name: string): bool = cssPseudoClasses.getOrDefault(name, "") == "1"
 proc isFunctionalPseudoElement*(name: string): bool = cssPseudoElements.getOrDefault(name, "") == "1"
+
+proc isDescriptor*(atRule, name: string): bool =
+  ## Is `name` a descriptor of `atRule` (with its `@`, e.g. "@font-face")?
+  cssDescriptors.hasKey(atRule & "/" & name)
+proc descriptorSyntax*(atRule, name: string): string =
+  ## The descriptor's value-definition syntax (`""` if unknown).
+  cssDescriptors.getOrDefault(atRule & "/" & name, "")
+
+proc isInherited*(prop: string): bool = cssInherited.getOrDefault(prop, "") == "1"
+proc rawInitialValue*(prop: string): string =
+  ## MDN's `initial` field verbatim. Sometimes prose ("seeProse",
+  ## "dependsOnUserAgent"); `css/computed.initialValue` filters those out.
+  cssInitials.getOrDefault(prop, "")
+proc isShorthand*(prop: string): bool = cssLonghands.hasKey(prop)
+proc longhandsOf*(prop: string): seq[string] =
+  ## The longhands a shorthand sets, in MDN order (`@[]` for a longhand).
+  result = @[]
+  let s = cssLonghands.getOrDefault(prop, "")
+  var cur = ""
+  var i = 0
+  while i <= s.len:
+    if i == s.len or s[i] == ' ':
+      if cur.len > 0: result.add cur
+      cur = ""
+    else:
+      cur.add s[i]
+    inc i

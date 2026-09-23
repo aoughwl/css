@@ -16,7 +16,7 @@ import std/[json, os, strutils, tables, algorithm]
 
 const here = currentSourcePath().parentDir
 const dataDir = here / ".." / "data"
-const outFile = here / ".." / "data.aowl"
+const outFile = here / ".." / "data.nim"
 
 proc load(name: string): JsonNode =
   parseFile(dataDir / name & ".json")
@@ -57,9 +57,25 @@ proc emit(entries: seq[(string, string)]): string =
 when isMainModule:
   # properties: name -> value-definition syntax
   var props: seq[(string, string)]
+  # ... and the cascade facts the computed-style resolver needs:
+  #   inherited:  name -> "1" when the property inherits by default
+  #   initial:    name -> MDN initial value (a longhand only; prose sentinels such
+  #               as "seeProse" are dropped at load time by re-validating them)
+  #   longhands:  shorthand name -> space-separated longhand names
+  var inherited, initials, longhands: seq[(string, string)]
   for name, body in load("properties").pairs:
     if body.hasKey("syntax"):
       props.add (name, body["syntax"].getStr)
+    if body.hasKey("inherited") and body["inherited"].getBool:
+      inherited.add (name, "1")
+    if body.hasKey("initial"):
+      let ini = body["initial"]
+      if ini.kind == JString:
+        initials.add (name, ini.getStr)
+      elif ini.kind == JArray:
+        var parts: seq[string]
+        for x in ini: parts.add x.getStr
+        longhands.add (name, parts.join(" "))
 
   # syntaxes: <name> -> value-definition syntax
   var synt: seq[(string, string)]
@@ -82,8 +98,14 @@ when isMainModule:
 
   # at-rules: @name -> syntax
   var atrules: seq[(string, string)]
+  # descriptors: "@rule/descriptor" -> value-definition syntax
+  var descs: seq[(string, string)]
   for name, body in load("at-rules").pairs:
     atrules.add (name, (if body.hasKey("syntax"): body["syntax"].getStr else: ""))
+    if body.hasKey("descriptors"):
+      for d, dbody in body["descriptors"].pairs:
+        if dbody.hasKey("syntax"):
+          descs.add (name & "/" & d, dbody["syntax"].getStr)
 
   # selectors: split the pseudo-classes / pseudo-elements out of the concept list.
   # Key = bare name (no leading colons, no trailing "()"); val = "1" if functional.
@@ -116,7 +138,11 @@ when isMainModule:
   o.add "const cssUnitBlob* = " & escape(emit(units)) & "\n\n"
   o.add "const cssAtRuleBlob* = " & escape(emit(atrules)) & "\n\n"
   o.add "const cssPseudoClassBlob* = " & escape(emit(pclasses)) & "\n\n"
-  o.add "const cssPseudoElementBlob* = " & escape(emit(pelements)) & "\n"
+  o.add "const cssPseudoElementBlob* = " & escape(emit(pelements)) & "\n\n"
+  o.add "const cssDescriptorBlob* = " & escape(emit(descs)) & "\n\n"
+  o.add "const cssInheritedBlob* = " & escape(emit(inherited)) & "\n\n"
+  o.add "const cssInitialBlob* = " & escape(emit(initials)) & "\n\n"
+  o.add "const cssLonghandBlob* = " & escape(emit(longhands)) & "\n"
 
   writeFile(outFile, o)
   echo "wrote ", outFile
@@ -127,3 +153,7 @@ when isMainModule:
   echo "  at-rules:        ", atrules.len
   echo "  pseudo-classes:  ", pclasses.len
   echo "  pseudo-elements: ", pelements.len
+  echo "  descriptors:     ", descs.len
+  echo "  inherited:       ", inherited.len
+  echo "  initial values:  ", initials.len
+  echo "  shorthands:      ", longhands.len

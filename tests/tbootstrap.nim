@@ -2,7 +2,7 @@
 ## declaration against its MDN grammar and every selector against Selectors-4,
 ## and benchmark the throughput.
 ##
-## Path comes from the BOOTSTRAP_CSS env var (default /tmp/bootstrap.css).
+## Path comes from the BOOTSTRAP_CSS env var (default "bootstrap.css").
 
 import std/syncio
 import std/envvars
@@ -15,7 +15,7 @@ type Report = object
   badDecls: seq[string]
   badSels: seq[string]
 
-proc walk(rules: seq[Rule], inKeyframes: bool, decls: var seq[Declaration],
+proc walk(rules: seq[ParsedRule], inKeyframes: bool, decls: var seq[Declaration],
           sels: var seq[string]) =
   var i = 0
   while i < rules.len:
@@ -64,7 +64,7 @@ proc runOnce(src: string, collect: bool): Report =
     inc i
   rep
 
-let path = getEnv("BOOTSTRAP_CSS", "/tmp/bootstrap.css")
+let path = getEnv("BOOTSTRAP_CSS", "bootstrap.css")
 var src = ""
 try:
   src = readFile(path)
