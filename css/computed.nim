@@ -90,6 +90,12 @@ type
     registered: seq[Registered]
     nextOrder: int
     anon: int
+    index: Table[string, seq[int]]    ## rightmost-compound key → rule indices
+    seen: seq[int]                    ## per-rule stamp, to dedupe index hits
+    stamp: int
+    mediaCache: Table[string, bool]   ## per computedStyle/computeTree call
+    validCache: Table[string, bool]   ## prop \0 value → valid
+    expandCache: Table[string, seq[Longhand]]
 
   ComputedStyle* = object
     values*: Table[string, string]   ## every property set on or inherited by
@@ -130,7 +136,71 @@ proc hasVar(v: string): bool =
   false
 
 proc newStyleEngine*(env = defaultEnv()): StyleEngine =
-  StyleEngine(env: env, rules: @[], layerOrder: @[], registered: @[], nextOrder: 0, anon: 0)
+  StyleEngine(env: env, rules: @[], layerOrder: @[], registered: @[], nextOrder: 0, anon: 0,
+              index: initTable[string, seq[int]](), seen: @[], stamp: 0,
+              mediaCache: initTable[string, bool](), validCache: initTable[string, bool](),
+              expandCache: initTable[string, seq[Longhand]]())
+
+proc keyOf(c: Complex): string =
+  ## The bucket a complex selector is filed under: its rightmost compound's
+  ## id, else a class, else its tag, else "*".
+  if c.compounds.len == 0: return "*"
+  let comp = c.compounds[c.compounds.len - 1]
+  var cls = ""
+  var tag = ""
+  var i = 0
+  while i < comp.simples.len:
+    let sp = comp.simples[i]
+    case sp.kind
+    of skId: return "#" & sp.name
+    of skClass:
+      if cls.len == 0: cls = "." & sp.name
+    of skType: tag = lower(sp.name)
+    else: discard
+    inc i
+  if cls.len > 0: return cls
+  if tag.len > 0: return tag
+  "*"
+
+proc fileRule(e: StyleEngine, idx: int) =
+  var keys: seq[string] = @[]
+  var i = 0
+  while i < e.rules[idx].list.len:
+    let k = keyOf(e.rules[idx].list[i])
+    var dup = false
+    var j = 0
+    while j < keys.len:
+      if keys[j] == k: dup = true
+      inc j
+    if not dup: keys.add k
+    inc i
+  i = 0
+  while i < keys.len:
+    var b = e.index.getOrDefault(keys[i], @[])
+    b.add idx
+    e.index[keys[i]] = b
+    inc i
+  e.seen.add 0
+
+proc validCached(e: StyleEngine, prop, value: string): bool =
+  let k = prop & "\x00" & value
+  if e.validCache.hasKey(k): return e.validCache.getOrDefault(k, false)
+  let r = validateValue(prop, value).valid
+  e.validCache[k] = r
+  r
+
+proc expandCached(e: StyleEngine, prop, value: string): tuple[ok: bool, longhands: seq[Longhand]] =
+  let k = prop & "\x00" & value
+  if e.expandCache.hasKey(k): return (true, e.expandCache.getOrDefault(k, @[]))
+  let x = expandShorthand(prop, value)
+  if x.ok: e.expandCache[k] = x.longhands
+  x
+
+proc mediaTrue(e: StyleEngine, q: string): bool =
+  if e.mediaCache.hasKey(q): return e.mediaCache.getOrDefault(q, false)
+  let r = evalMediaQueryList(q, e.env)
+  e.mediaCache[q] = r
+  r
 
 # --- adding sheets ---------------------------------------------------------------
 
@@ -334,6 +404,7 @@ proc addRuleDecls(e: StyleEngine, list: SelectorList, text: string, decls: seq[D
                           scopeStart: fr.scopeStart, scopeEnd: fr.scopeEnd,
                           scoped: fr.scoped, source: source, selectorText: text,
                           line: line)
+    fileRule(e, e.rules.len - 1)
     inc e.nextOrder
     inc g
 
@@ -675,7 +746,7 @@ proc ruleMatches(e: StyleEngine, el: Element, r: StyleRule, pseudo: string):
   if r.pseudo != pseudo: return (false, Specificity())
   var mi = 0
   while mi < r.media.len:
-    if not evalMediaQueryList(r.media[mi], e.env): return (false, Specificity())
+    if not mediaTrue(e, r.media[mi]): return (false, Specificity())
     inc mi
   var scope: nil Element = nil
   if r.scoped:
@@ -693,10 +764,49 @@ proc ruleMatches(e: StyleEngine, el: Element, r: StyleRule, pseudo: string):
     inc i
   (any, best)
 
+proc candidateRules(e: StyleEngine, el: Element): seq[int] =
+  ## The rules whose rightmost compound could match `el`, in source order.
+  result = @[]
+  inc e.stamp
+  var keys = @["*", el.tag]
+  let id = el.id
+  if id.len > 0: keys.add "#" & id
+  let cls = el.classes
+  var i = 0
+  while i < cls.len:
+    keys.add "." & cls[i]
+    inc i
+  i = 0
+  while i < keys.len:
+    if e.index.hasKey(keys[i]):
+      let b = e.index.getOrDefault(keys[i], @[])
+      var j = 0
+      while j < b.len:
+        let r = b[j]
+        if e.seen[r] != e.stamp:
+          e.seen[r] = e.stamp
+          result.add r
+        inc j
+    inc i
+  # insertion sort: source order (buckets are each already sorted)
+  var a = 1
+  while a < result.len:
+    let x = result[a]
+    var b = a - 1
+    while b >= 0 and result[b] > x:
+      let moved = result[b]
+      result[b + 1] = moved
+      dec b
+    result[b + 1] = x
+    inc a
+
 proc collect(e: StyleEngine, el: Element, pseudo: string): Table[string, seq[Candidate]] =
   result = initTable[string, seq[Candidate]]()
-  var ri = 0
-  while ri < e.rules.len:
+  let ruleIdx = candidateRules(e, el)
+  var rk = 0
+  while rk < ruleIdx.len:
+    let ri = ruleIdx[rk]
+    inc rk
     let r = e.rules[ri]
     let m = ruleMatches(e, el, r, pseudo)
     if m.ok:
@@ -726,7 +836,6 @@ proc collect(e: StyleEngine, el: Element, pseudo: string): Table[string, seq[Can
           s.add c
           result[d.prop] = s
         inc k
-    inc ri
   # the style attribute: element-attached, author origin
   if pseudo.len == 0 and el.hasAttr("style"):
     let ds = toCDecls(parseDeclarations(el.getAttr("style")))
@@ -1231,7 +1340,7 @@ proc computeOne(e: StyleEngine, el: Element, pseudo: string, parent: ComputedSty
       if not ok:
         v = "unset"
       else:
-        let x = expandShorthand(sh, sv)
+        let x = expandCached(e, sh, sv)
         v = "unset"
         if x.ok:
           k = 0
@@ -1241,7 +1350,7 @@ proc computeOne(e: StyleEngine, el: Element, pseudo: string, parent: ComputedSty
     elif hasVar(v):
       var ok = true
       let sv = substitute(v, vars, ok, 0)
-      v = (if ok and validateValue(p, sv).valid: sv else: "unset")
+      v = (if ok and validCached(e, p, sv): sv else: "unset")
     let l = lower(trimS(v))
     if l == "unset": v = (if isInherited(p): "inherit" else: "initial")
     let l2 = lower(trimS(v))
@@ -1310,6 +1419,7 @@ proc ancestorsTopDown(el: Element): seq[Element] =
 proc computedStyle*(e: StyleEngine, el: Element, pseudo = ""): ComputedStyle =
   ## The computed style of `el` (or of its `::pseudo` part: "before", "after",
   ## "marker", …), computing its ancestors first for inheritance.
+  e.mediaCache.clear()
   let chain = ancestorsTopDown(el)
   var parent = ComputedStyle(values: initTable[string, string]())
   var hasParent = false
@@ -1348,6 +1458,7 @@ proc why*(e: StyleEngine, el: Element, prop: string, pseudo = ""): string =
   ## Explain the cascaded value of `prop` on `el`: the winning declaration,
   ## where it came from, and what it beat.
   let p = (if isCustom(prop): prop else: lower(prop))
+  e.mediaCache.clear()
   let cands = collect(e, el, lower(pseudo))
   let list = cands.getOrDefault(p, @[])
   if list.len == 0:
@@ -1362,3 +1473,20 @@ proc why*(e: StyleEngine, el: Element, prop: string, pseudo = ""): string =
       if others < 5: result.add "\n  beats " & describe(e, list[i])
       inc others
     inc i
+
+proc computeTreeInto(e: StyleEngine, el: Element, parent: ComputedStyle, hasParent: bool,
+                     rootFont: float, dest: var seq[tuple[el: Element, style: ComputedStyle]]) =
+  let cs = computeOne(e, el, "", parent, hasParent, rootFont)
+  let rf = (if hasParent: rootFont else: pxOf(cs.get("font-size"), 16.0))
+  dest.add (el: el, style: cs)
+  var i = 0
+  while i < el.children.len:
+    computeTreeInto(e, el.children[i], cs, true, rf, dest)
+    inc i
+
+proc computeTree*(e: StyleEngine, root: Element): seq[tuple[el: Element, style: ComputedStyle]] =
+  ## The computed style of `root` and every descendant, in document order —
+  ## each element computed once, from its already-computed parent.
+  result = @[]
+  e.mediaCache.clear()
+  computeTreeInto(e, root, ComputedStyle(values: initTable[string, string]()), false, 16.0, result)
