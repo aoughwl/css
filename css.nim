@@ -27,4 +27,7 @@ import css/atrules
 import css/lint
 import css/dom
 import css/match
-export validator, selectors, cascade, data_load, styleval, stylesheet, parse, atrules, lint, dom, match
+import css/media
+import css/shorthand
+import css/computed
+export validator, selectors, cascade, data_load, styleval, stylesheet, parse, atrules, lint, dom, match, media, shorthand, computed
