@@ -100,6 +100,19 @@ if rep.badSels.len > 0:
     echo "  " & rep.badSels[i]
     inc i
 
+# --- whole-sheet lint: context, at-rule preludes, ordering, parse recovery ---
+let diags = lintStylesheet(src)
+echo ""
+echo "lint diagnostics:  " & $diags.len
+i = 0
+while i < diags.len and i < 40:
+  echo "  " & $diags[i]
+  inc i
+# Bootstrap is valid CSS: every one of these is a false positive.
+if rep.dBad > 0 or rep.sBad > 0 or diags.len > 0:
+  echo "FAIL bootstrap: " & $rep.dBad & " bad decls, " & $rep.sBad & " bad selectors, " &
+       $diags.len & " lint diagnostics"
+
 # --- benchmark: three tiers matched 1:1 with the other tools ---------------
 #   parse    — CSS text -> rules + declarations         (vs lightningcss/postcss/csstree parse)
 #   values   — parse + MDN value-grammar match, decls    (vs csstree matchProperty)

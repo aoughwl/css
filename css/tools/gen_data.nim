@@ -40,6 +40,33 @@ proc unitDimension(name: string; groups: seq[string]): string =
     else: discard
   "other"
 
+# --- spec facts the MDN data lacks --------------------------------------------
+# Each patch names the spec it comes from. A syntax patch asserts that its
+# `before` text is still present, so the day MDN fixes the data the generator
+# fails loudly and the patch can be deleted instead of silently double-applying.
+
+const extraLengthUnits = [
+  # CSS Values 4: line-height, root-relative font, and the viewport variants
+  "lh", "rlh", "rcap", "rch", "rex", "ric", "vi", "vb",
+  "svw", "svh", "svi", "svb", "svmin", "svmax",
+  "lvw", "lvh", "lvi", "lvb", "lvmin", "lvmax",
+  "dvw", "dvh", "dvi", "dvb", "dvmin", "dvmax",
+  # CSS Containment 3: container query lengths
+  "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax"]
+
+const syntaxPatches = [
+  # CSS Generated Content 3: attr() is a <content-list> item
+  ("content-list", "<leader()> ]+", "<leader()> | <attr()> ]+"),
+]
+
+proc patchSyntax(entries: var seq[(string, string)], key, before, after: string) =
+  for e in entries.mitems:
+    if e[0] == key:
+      doAssert before in e[1], "stale patch: " & key & " no longer contains " & before
+      e[1] = e[1].replace(before, after)
+      return
+  doAssert false, "patch target missing: " & key
+
 proc emit(entries: seq[(string, string)]): string =
   ## Join (key,val) pairs into a "key\tval\n…" blob, sorted by key for
   ## deterministic output (so regenerating produces a clean diff).
@@ -83,6 +110,8 @@ when isMainModule:
     if body.hasKey("syntax"):
       synt.add (name, body["syntax"].getStr)
 
+  for (k, b, a) in syntaxPatches: patchSyntax(synt, k, b, a)
+
   # basic data types: just the set of names (angle, color, length, …)
   var types: seq[(string, string)]
   for name, _ in load("types").pairs:
@@ -95,6 +124,9 @@ when isMainModule:
     if body.hasKey("groups"):
       for g in body["groups"]: groups.add g.getStr
     units.add (name, unitDimension(name, groups))
+  for u in extraLengthUnits:
+    for (k, _) in units: doAssert k != u, "stale unit patch: MDN now has " & u
+    units.add (u, "length")
 
   # at-rules: @name -> syntax
   var atrules: seq[(string, string)]

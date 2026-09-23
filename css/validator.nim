@@ -308,6 +308,41 @@ func newUsed(n: int): seq[bool] =
 
 proc matchNode(id, pos: int): seq[int]
 proc matchOne(id, pos: int): seq[int]
+
+func isVendorKeyword(l: string): bool =
+  ## Already lower-cased. The prefixes browsers actually ship.
+  (l.len > 8 and l[0] == '-' and l[1] == 'w' and l[2] == 'e' and l[3] == 'b' and
+     l[4] == 'k' and l[5] == 'i' and l[6] == 't' and l[7] == '-') or
+  (l.len > 5 and l[0] == '-' and l[1] == 'm' and l[2] == 'o' and l[3] == 'z' and l[4] == '-') or
+  (l.len > 4 and l[0] == '-' and l[1] == 'm' and l[2] == 's' and l[3] == '-')
+
+proc commaSeparate(args: string): string =
+  ## `rect(0 0 0 0)` → `0, 0, 0, 0`: CSS 2.1 lets UAs accept rect() without
+  ## commas, and every browser does.
+  let toks = lexValue(args)
+  var i = 0
+  while i < toks.len:
+    if toks[i].kind == vtComma: return args
+    inc i
+  result = ""
+  var depth = 0
+  var prevSpace = false
+  var k = 0
+  var started = false
+  while k < args.len:
+    let c = args[k]
+    if c == '(':
+      inc depth
+    elif c == ')':
+      if depth > 0: dec depth
+    if depth == 0 and (c == ' ' or c == '\t' or c == '\n'):
+      prevSpace = started
+    else:
+      if prevSpace: result.add ", "
+      prevSpace = false
+      started = true
+      result.add c
+    inc k
 proc subMatch(root: int, args: string): bool
 
 type Level* = enum
@@ -467,6 +502,10 @@ proc matchOne(id, pos: int): seq[int] =
     # per value — so a big keyword OR never re-lowercases the same token.
     if pos < gToks.len and gToks[pos].kind == vtIdent and gLower[pos] == n.text:
       result = @[pos+1]
+    elif pos < gToks.len and gToks[pos].kind == vtIdent and isVendorKeyword(gLower[pos]):
+      # `-webkit-focus-ring-color`, `-moz-available`: a browser's own keyword
+      # standing where a keyword goes. Real, and unknowable from MDN data.
+      result = @[pos+1]
     else:
       expect(pos, "'" & n.text & "'")
       result = @[]
@@ -496,7 +535,8 @@ proc matchOne(id, pos: int): seq[int] =
       elif n.argRoot >= 0 and gLevel == lvFull and fname != "var" and fname != "env":
         # an inline `name( arg )`: its arguments have a grammar right here, so
         # check them now (nested match, own state) — `fit-content(red)` fails.
-        if subMatch(n.argRoot, gToks[pos].args): result = @[pos+1]
+        let args = (if fname == "rect": commaSeparate(gToks[pos].args) else: gToks[pos].args)
+        if subMatch(n.argRoot, args): result = @[pos+1]
         else: expect(pos, "valid arguments to " & n.text & "()")
       else:
         result = @[pos+1]
@@ -1030,6 +1070,10 @@ proc validateValue*(prop, value: string): tuple[valid: bool, error: string] =
       prop = lower(prop)             # property names are ASCII case-insensitive
     else:
       return (false, prop & " is not a known CSS property")
+  # `overflow: overlay` is a legacy value alias of `auto` (CSS Overflow 3 §3.1:
+  # UAs must support it), and MDN's grammar does not list it.
+  if lower(value) == "overlay" and hasPrefix(prop, "overflow"):
+    return (true, "")
   checkValue("p:" & prop, propertySyntax(prop), value, true)
 
 proc validateAgainst*(syntax, value: string): tuple[valid: bool, error: string] =

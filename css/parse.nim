@@ -38,8 +38,12 @@ type
     decls*: seq[Declaration]
     children*: seq[ParsedRule]
     line*: int                ## 1-based source line of the prelude
+  ParseProblem* = object
+    line*: int
+    message*: string
   ParsedSheet* = object
     rules*: seq[ParsedRule]
+    problems*: seq[ParseProblem]   ## what the parser had to recover from
 
 # --- small non-raising string helpers --------------------------------------
 
@@ -145,6 +149,43 @@ proc findTop(sc: Scanner, start: int): tuple[pos: int, ch: char] =
       inc i
   (sc.n, '\x00')
 
+proc findDeclEnd(sc: Scanner, start: int): int =
+  ## A custom property's value may hold `{ … }` blocks (`--x: { a b };`). From
+  ## `start`, the end of such a declaration: the next `;` or unmatched `}` at
+  ## depth 0, counting all three bracket kinds.
+  var i = start
+  var depth = 0
+  while i < sc.n:
+    let c = sc.s[i]
+    if atComment(sc, i):
+      i = skipComment(sc, i)
+    elif c == '\\':
+      i += 2
+    elif c == '"' or c == '\'':
+      i = skipString(sc, i)
+    elif c == '(' or c == '[' or c == '{':
+      inc depth
+      inc i
+    elif c == ')' or c == ']' or c == '}':
+      if depth == 0: return i
+      dec depth
+      inc i
+    elif c == ';' and depth == 0:
+      return i
+    else:
+      inc i
+  sc.n
+
+proc isCustomPropStart(sc: Scanner, i, stop: int): bool =
+  ## Does sc.s[i ..< stop] read `--name:` (ws allowed before the colon)?
+  if i + 2 >= stop or sc.s[i] != '-' or sc.s[i+1] != '-': return false
+  var j = i + 2
+  while j < stop and sc.s[j] != ':' and sc.s[j] != ' ' and sc.s[j] != '\t' and
+        sc.s[j] != '\n':
+    inc j
+  while j < stop and (sc.s[j] == ' ' or sc.s[j] == '\t' or sc.s[j] == '\n'): inc j
+  j < stop and sc.s[j] == ':'
+
 # --- declaration & prelude parsing -----------------------------------------
 
 proc stripComments(s: string): string =
@@ -240,7 +281,15 @@ proc atPreludeOf(prelude: string): string =
 
 # --- the recursive body parser ---------------------------------------------
 
-proc parseBody(sc: Scanner, start: int, topLevel: bool):
+proc problem(probs: var seq[ParseProblem], line: int, msg: string) =
+  probs.add ParseProblem(line: line, message: msg)
+
+proc clip(s: string): string =
+  ## A short excerpt for a message.
+  if s.len <= 40: s else: slice(s, 0, 37) & "..."
+
+proc parseBody(sc: Scanner, start: int, topLevel: bool, openLine: int,
+               probs: var seq[ParseProblem]):
     tuple[rules: seq[ParsedRule], decls: seq[Declaration], nextPos: int] =
   var rules: seq[ParsedRule] = @[]
   var decls: seq[Declaration] = @[]
@@ -252,10 +301,14 @@ proc parseBody(sc: Scanner, start: int, topLevel: bool):
       inc i
       continue
     if atComment(sc, i):
-      i = skipComment(sc, i)
+      let e = skipComment(sc, i)
+      if e >= sc.n and not (sc.n >= 2 and sc.s[sc.n-2] == '*' and sc.s[sc.n-1] == '/'):
+        problem(probs, lineOf(sc, i), "unterminated comment")
+      i = e
       continue
     if c == '}':
       if topLevel:
+        problem(probs, lineOf(sc, i), "stray '}' with no block to close")
         inc i                       # stray '}' at top level: skip defensively
         continue
       return (rules, decls, i + 1)   # consume the closing brace
@@ -263,10 +316,14 @@ proc parseBody(sc: Scanner, start: int, topLevel: bool):
        (slice(sc.s, i, i + 4) == "<!--" or slice(sc.s, i, i + 3) == "-->"):
       i = i + (if c == '<': 4 else: 3)   # CDO / CDC: ignored at top level
       continue
-    let hit = findTop(sc, i)
+    var hit = findTop(sc, i)
+    if hit.ch == '{' and not topLevel and isCustomPropStart(sc, i, hit.pos):
+      # `--x: { … }` is a declaration whose value holds a block, not a rule
+      let e = findDeclEnd(sc, i)
+      hit = (e, (if e < sc.n: sc.s[e] else: '\x00'))
     if hit.ch == '{':
       let prelude = trimmed(stripComments(slice(sc.s, i, hit.pos)))
-      let inner = parseBody(sc, hit.pos + 1, false)
+      let inner = parseBody(sc, hit.pos + 1, false, lineOf(sc, i), probs)
       let ak = atKeywordOf(prelude)
       let isAt = ak.len > 0
       rules.add ParsedRule(prelude: prelude, isAtRule: isAt, atKeyword: ak,
@@ -289,6 +346,8 @@ proc parseBody(sc: Scanner, start: int, topLevel: bool):
           if d.ok:
             d.decl.line = lineOf(sc, i)
             decls.add d.decl
+          else:
+            problem(probs, lineOf(sc, i), "expected 'property: value', got '" & clip(text) & "'")
       i = hit.pos + 1
     elif hit.ch == '}':
       let text = trimmed(slice(sc.s, i, hit.pos))
@@ -297,6 +356,8 @@ proc parseBody(sc: Scanner, start: int, topLevel: bool):
         if d.ok:
           d.decl.line = lineOf(sc, i)
           decls.add d.decl
+        else:
+          problem(probs, lineOf(sc, i), "expected 'property: value', got '" & clip(text) & "'")
       i = hit.pos                    # let the loop see the '}' and close
     else:
       # EOF inside a run: an unterminated final declaration / statement is
@@ -314,19 +375,25 @@ proc parseBody(sc: Scanner, start: int, topLevel: bool):
           if d.ok:
             d.decl.line = lineOf(sc, i)
             decls.add d.decl
+        else:
+          problem(probs, lineOf(sc, i), "unexpected '" & clip(text) & "' at end of file")
       i = sc.n
+  if not topLevel and openLine > 0:
+    problem(probs, openLine, "'{' opened here is never closed")
   (rules, decls, i)
 
 proc parseStylesheet*(src: string): ParsedSheet =
   ## Parse a whole stylesheet. Top-level declarations (which CSS does not
   ## allow) are dropped, exactly as a browser drops them.
   let sc = newScanner(src)
-  let body = parseBody(sc, 0, true)
-  ParsedSheet(rules: body.rules)
+  var probs: seq[ParseProblem] = @[]
+  let body = parseBody(sc, 0, true, 0, probs)
+  ParsedSheet(rules: body.rules, problems: probs)
 
 proc parseDeclarations*(src: string): seq[Declaration] =
   ## Parse the inside of a declaration block — a `style="…"` attribute, or the
   ## text between `{` and `}` — into its declarations (nested rules dropped).
   let sc = newScanner(src)
-  let body = parseBody(sc, 0, false)
+  var probs: seq[ParseProblem] = @[]
+  let body = parseBody(sc, 0, false, 0, probs)
   body.decls
