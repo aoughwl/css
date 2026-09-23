@@ -986,10 +986,19 @@ proc absolutize(value: string, c: LenCtx): string =
     var n = 0.0
     var unit = ""
     var outTok = t
-    if parseNumPrefix(t, n, unit) and unit.len > 0:
-      var ok = false
-      let px = toPx(n, unit, c, ok)
-      if ok: outTok = fmtNum(px) & "px"
+    if parseNumPrefix(t, n, unit):
+      if unit.len > 0:
+        var ok = false
+        let px = toPx(n, unit, c, ok)
+        let lu = lower(unit)
+        if ok: outTok = fmtNum(px) & "px"
+        elif lu == "ms": outTok = fmtNum(n / 1000.0) & "s"      # times compute to s
+        elif lu == "s" or lu == "deg" or lu == "%" or lu == "fr" or lu == "x" or
+             lu == "dppx" or lu == "turn" or lu == "rad" or lu == "grad" or
+             lu == "hz" or lu == "khz" or lu == "dpi" or lu == "dpcm":
+          outTok = fmtNum(n) & lu                              # canonical number
+      else:
+        outTok = fmtNum(n)                                     # .5 → 0.5
     if i > 0 and t != "," and toks[i-1] != "/" and t != "/":
       result.add ' '
     elif i > 0 and (t == "/" or toks[i-1] == "/"):

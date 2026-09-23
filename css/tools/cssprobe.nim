@@ -5,6 +5,7 @@
 ##   css/tools/probe.sh -x <syntax> <value>         validate against any grammar
 ##   css/tools/probe.sh -s <selector>               validate a selector (+ specificity)
 ##   css/tools/probe.sh -f <file.css>…              lint whole stylesheets
+##   css/tools/probe.sh -m <css>                    minify a stylesheet
 import std/[syncio, cmdline]
 import ../../css
 
@@ -25,6 +26,8 @@ if n >= 2 and paramStr(1) == "-f":
     total = total + ds.len
     inc k
   echo $total & " diagnostics"
+elif n >= 2 and paramStr(1) == "-m":
+  echo minifyStylesheet(paramStr(2))
 elif n >= 4 and paramStr(1) == "-d":
   show validateDescriptor(paramStr(2), paramStr(3), paramStr(4))
 elif n >= 3 and paramStr(1) == "-x":
